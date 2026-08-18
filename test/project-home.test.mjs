@@ -49,6 +49,7 @@ test("the persistent publisher creates backlog tasks and can bind selected threa
     appSource.indexOf("const contextName"),
   );
   assert.doesNotMatch(publisherSource, /codexThreadId: null|codexThreadName: null/);
+  assert.match(styles, /\.task-publisher\s*\{[^}]*padding:\s*8px 66px 10px 10px;/s);
   assert.match(styles, /\.task-publisher \{/);
 });
 

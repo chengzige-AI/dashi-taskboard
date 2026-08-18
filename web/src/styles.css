@@ -1877,7 +1877,7 @@ kbd {
   grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-  padding: 8px 10px 10px;
+  padding: 8px 66px 10px 10px;
   border-top: var(--border-hairline) solid var(--border);
   background: var(--bg);
 }
@@ -8769,7 +8769,7 @@ kbd {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     gap: 6px;
-    padding: 8px;
+    padding: 8px 60px 8px 8px;
   }
 
   .publisher-target,
