@@ -136,9 +136,10 @@ export class ProjectAutomationScheduler {
         thread.id,
         run.id,
       );
+      const visibleThreadId = this.database.getAiChatThread(thread.id)?.codexThreadId ?? null;
       const comment = this.database.createComment(task.id, {
-        body: `AI 已自动认领任务，执行会话：${thread.codexThreadId ?? thread.id}`,
-        threadId: thread.id,
+        body: "AI 已自动认领任务，正在关联的 AI 会话中执行。",
+        threadId: visibleThreadId,
         actor: AI_AGENT_ACTOR,
       });
       this.events.emit("task.moved", { task: activated.task });
@@ -157,9 +158,12 @@ export class ProjectAutomationScheduler {
       if (restored) {
         if (!shouldRetry) {
           const blocked = this.database.moveTask(restored.id, restored.version, "blocked");
+          const visibleThreadId = thread
+            ? this.database.getAiChatThread(thread.id)?.codexThreadId ?? null
+            : null;
           const comment = this.database.createComment(task.id, {
             body: `自动执行启动失败：${message}`,
-            threadId: thread?.id ?? null,
+            threadId: visibleThreadId,
             actor: AI_AGENT_ACTOR,
           });
           this.events.emit("task.moved", { task: blocked });
@@ -188,7 +192,7 @@ export class ProjectAutomationScheduler {
       task = this.database.updateTask(task.id, task.version, {
         codexThreadId: thread.codexThreadId,
         codexThreadName: thread.title,
-      }, thread.id);
+      }, thread.codexThreadId);
       this.events.emit("task.updated", { task });
     }
     if (!run || run.status === "running") {
@@ -203,12 +207,13 @@ export class ProjectAutomationScheduler {
 
     let updated = task;
     const shouldRetry = failed && isRetryableCapacityError(error);
+    const visibleThreadId = thread?.codexThreadId ?? task.codexThreadId ?? null;
     if (shouldRetry && task.status !== "todo") {
-      updated = this.database.moveTask(task.id, task.version, "todo");
+      updated = this.database.moveTask(task.id, task.version, "todo", undefined, visibleThreadId);
     } else if (failed && task.status !== "blocked") {
-      updated = this.database.moveTask(task.id, task.version, "blocked");
+      updated = this.database.moveTask(task.id, task.version, "blocked", undefined, visibleThreadId);
     } else if (!failed && !["done", "canceled"].includes(task.status)) {
-      updated = this.database.moveTask(task.id, task.version, "done");
+      updated = this.database.moveTask(task.id, task.version, "done", undefined, visibleThreadId);
     }
     this.events.emit("task.moved", { task: updated });
     if (!shouldRetry) {
@@ -216,7 +221,7 @@ export class ProjectAutomationScheduler {
         body: failed
           ? `自动执行失败：${error}`
           : "自动执行已完成，结果已写入关联的 AI 会话。",
-        threadId: policy.activeThreadId,
+        threadId: visibleThreadId,
         actor: AI_AGENT_ACTOR,
       });
       this.events.emit("comment.created", { comment });

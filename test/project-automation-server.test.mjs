@@ -103,6 +103,10 @@ test("server automation atomically claims one unblocked todo and completes it af
       message: "黄金未来还会涨吗\n请直接回答这个问题",
       direct: true,
     });
+    const startedComments = database.listComments(runnable.id);
+    assert.equal(startedComments.length, 1);
+    assert.equal(startedComments[0].threadId, "codex-new-thread-1");
+    assert.doesNotMatch(startedComments[0].body, /执行会话：[0-9a-f-]{36}/i);
 
     await scheduler.tick();
     assert.equal(database.getProjectAutomation("project").activeTaskId, runnable.id);
@@ -122,6 +126,9 @@ test("server automation atomically claims one unblocked todo and completes it af
     assert.equal(completedPolicy.activeRunId, null);
     assert.equal(completedPolicy.lastError, null);
     assert.equal(database.getTask(runnable.id).status, "done");
+    assert.equal(database.getTask(runnable.id).threadId, "codex-new-thread-1");
+    const completedComments = database.listComments(runnable.id);
+    assert.equal(completedComments.at(-1).threadId, "codex-new-thread-1");
     assert.ok(emitted.some((event) => event.type === "task.moved"));
 
     const droppedIntoTodo = database.createTask({
@@ -136,6 +143,60 @@ test("server automation atomically claims one unblocked todo and completes it af
     assert.equal(database.getProjectAutomation("project").activeTaskId, droppedIntoTodo.id);
     assert.equal(database.getTask(droppedIntoTodo.id).status, "in_progress");
     scheduler.close();
+  } finally {
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("startup repairs internal automation thread ids before exposing task and comment links", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-automation-thread-migration-"));
+  const filename = path.join(directory, "taskboard.sqlite");
+  let database = new TaskboardDatabase(filename);
+  try {
+    database.createProject({ id: "project", name: "Project", workspacePath: directory });
+    const actor = { type: "user", id: "local-user", name: "Local", avatarUrl: null };
+    const task = database.createTask({
+      projectId: "project",
+      title: "Migration target",
+      description: "",
+      status: "done",
+      priority: "none",
+      labels: [],
+      actor,
+      assignee: actor,
+      workflowId: null,
+      developmentContext: null,
+      dueDate: null,
+      recurrence: null,
+    });
+    const internalThread = database.createAiChatThread({
+      title: "Automation",
+      origin: {
+        projectId: "project",
+        projectName: "Project",
+        workspacePath: directory,
+        issueId: task.id,
+        issueIdentifier: task.identifier,
+      },
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+      sandbox: "workspace-write",
+      codexThreadId: "codex-visible-thread",
+    });
+    database.moveTask(task.id, task.version, "done", undefined, internalThread.id);
+    database.createComment(task.id, {
+      body: `AI 已自动认领任务，执行会话：${internalThread.id}`,
+      threadId: internalThread.id,
+      actor: { type: "agent", id: "codex-agent", name: "AI Agent", avatarUrl: null },
+    });
+    database.close();
+
+    database = new TaskboardDatabase(filename);
+    assert.equal(database.getTask(task.id).threadId, "codex-visible-thread");
+    const [comment] = database.listComments(task.id);
+    assert.equal(comment.threadId, "codex-visible-thread");
+    assert.equal(comment.body, "AI 已自动认领任务，正在关联的 AI 会话中执行。");
   } finally {
     database.close();
     await rm(directory, { recursive: true, force: true });

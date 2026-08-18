@@ -675,15 +675,13 @@ export function TaskDetail({
                     {description ? <DescriptionDocument value={description} /> : "添加描述…"}
                   </div>
                 )}
-                {currentTask.threadId && (
-                  <div className="issue-conversation-list" aria-label="处理此议题的对话">
-                    <ConversationLink threadId={currentTask.threadId} onOpen={onOpenThread} />
-                  </div>
-                )}
-                {currentTask.codexThreadId && currentTask.codexThreadId !== currentTask.threadId && (
-                  <div className="issue-conversation-list" aria-label="绑定的执行会话">
-                    <span className="codex-binding-label">执行会话：{currentTask.codexThreadName || "AI 会话"}</span>
-                    <ConversationLink threadId={currentTask.codexThreadId} onOpen={onOpenThread} />
+                {(currentTask.codexThreadId || currentTask.threadId) && (
+                  <div className="issue-conversation-list" aria-label="任务结果会话">
+                    <span className="codex-binding-label">结果会话：{currentTask.codexThreadName || "AI 会话"}</span>
+                    <ConversationLink
+                      threadId={currentTask.codexThreadId || currentTask.threadId!}
+                      onOpen={onOpenThread}
+                    />
                   </div>
                 )}
                 <section className="deliverables-section" aria-labelledby="deliverables-heading">

@@ -413,6 +413,37 @@ export class TaskboardDatabase {
     if (!taskColumns.some((column) => column.name === "codex_thread_name")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN codex_thread_name TEXT");
     }
+    this.database.exec(`
+      UPDATE comments
+      SET body = 'AI 已自动认领任务，正在关联的 AI 会话中执行。'
+      WHERE body LIKE 'AI 已自动认领任务，执行会话：%'
+        AND EXISTS (
+          SELECT 1 FROM ai_chat_threads
+          WHERE ai_chat_threads.id = comments.thread_id
+        );
+
+      UPDATE comments
+      SET thread_id = (
+        SELECT ai_chat_threads.codex_thread_id
+        FROM ai_chat_threads
+        WHERE ai_chat_threads.id = comments.thread_id
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM ai_chat_threads
+        WHERE ai_chat_threads.id = comments.thread_id
+      );
+
+      UPDATE tasks
+      SET thread_id = (
+        SELECT ai_chat_threads.codex_thread_id
+        FROM ai_chat_threads
+        WHERE ai_chat_threads.id = tasks.thread_id
+      )
+      WHERE EXISTS (
+        SELECT 1 FROM ai_chat_threads
+        WHERE ai_chat_threads.id = tasks.thread_id
+      );
+    `);
     if (!taskColumns.some((column) => column.name === "git_branch")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN git_branch TEXT");
     }
@@ -1811,6 +1842,17 @@ export class TaskboardDatabase {
 
   #commentWithAttachments(row) {
     const comment = commentFromRow(row);
+    if (comment.threadId) {
+      const aiThread = this.database.prepare(`
+        SELECT codex_thread_id FROM ai_chat_threads WHERE id = ?
+      `).get(comment.threadId);
+      if (aiThread) {
+        comment.threadId = aiThread.codex_thread_id;
+        if (comment.body.startsWith("AI 已自动认领任务，执行会话：")) {
+          comment.body = "AI 已自动认领任务，正在关联的 AI 会话中执行。";
+        }
+      }
+    }
     comment.attachments = this.#attachmentsForComment(comment.id);
     return comment;
   }

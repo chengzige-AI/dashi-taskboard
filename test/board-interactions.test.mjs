@@ -136,6 +136,9 @@ test("issues expose processing conversations without manual binding", () => {
   assert.doesNotMatch(detailSource, /输入对话 ID|解除 Codex 对话绑定|>绑定</);
   assert.doesNotMatch(editorSource, /对话 ID|linkedThreadId/);
   assert.match(detailSource, /currentTask\.threadId/);
+  assert.match(detailSource, /currentTask\.codexThreadId \|\| currentTask\.threadId/);
+  assert.match(detailSource, /aria-label="任务结果会话"/);
+  assert.doesNotMatch(detailSource, /aria-label="处理此议题的对话"/);
   assert.doesNotMatch(detailSource, /currentTask\.threadIds/);
   assert.match(detailSource, /<strong>查看对话<\/strong>/);
   assert.match(detailSource, /className="conversation-thread-id">\{threadId\}/);
