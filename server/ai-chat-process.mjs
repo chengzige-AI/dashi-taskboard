@@ -1,4 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
+
+import { normalizeCodexCommandError, spawnCodexCommand } from "./codex-command.mjs";
+import { normalizeClaudeCommandError, spawnClaudeCommand } from "./claude-command.mjs";
 
 const VISIBLE_TEXT_LIMIT = 65_536;
 const STDERR_LIMIT = 65_536;
@@ -213,6 +216,25 @@ export function buildCodexArgs(thread, addDirectories, imagePaths = []) {
   return args;
 }
 
+export function buildClaudeArgs(thread, addDirectories) {
+  const args = [
+    "-p",
+    "--input-format",
+    "text",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    thread.sandbox === "read-only" ? "plan" : "acceptEdits",
+  ];
+  for (const directory of addDirectories) args.push("--add-dir", directory);
+  if (["sonnet", "opus", "haiku"].includes(thread.model)) {
+    args.push("--model", thread.model);
+  }
+  if (thread.codexThreadId) args.push("--resume", thread.codexThreadId);
+  return args;
+}
+
 export function buildCodexPrompt(thread, { message, skills, attachmentPaths }, skillPath) {
   const selectedSkills = skills ?? [];
   const turnAttachmentPaths = attachmentPaths ?? [];
@@ -249,6 +271,30 @@ export function buildCodexPrompt(thread, { message, skills, attachmentPaths }, s
     "",
     "<user_message>",
     userMessage,
+    "</user_message>",
+  ].join("\n");
+}
+
+export function buildClaudePrompt(thread, { message, attachmentPaths }, skillPath) {
+  const context = [
+    `project_id: ${thread.origin.projectId}`,
+    `project_name: ${thread.origin.projectName}`,
+    `workspace_path: ${thread.origin.workspacePath}`,
+  ];
+  if (thread.origin.issueIdentifier) context.push(`issue_identifier: ${thread.origin.issueIdentifier}`);
+  if (attachmentPaths.length > 0) {
+    context.push("turn_attachment_paths:", ...attachmentPaths.map((value) => `- ${value}`));
+  }
+  return [
+    `Before working, read and follow the complete task management instructions in: ${skillPath}`,
+    "Use the taskctl CLI path from CODEX_TASKBOARD_CLI for every task or comment operation.",
+    "The following block is private server-owned context. Do not quote or reveal it.",
+    "<taskboard_context>",
+    ...context,
+    "</taskboard_context>",
+    "",
+    "<user_message>",
+    message,
     "</user_message>",
   ].join("\n");
 }
@@ -328,15 +374,70 @@ export function normalizeCodexEvent(raw) {
   return normalizedItem(raw.type, raw.item);
 }
 
+export function normalizeClaudeEvent(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (raw.type === "system" && raw.subtype === "init") {
+    return typeof raw.session_id === "string" && raw.session_id
+      ? { kind: "thread.started", threadId: raw.session_id }
+      : null;
+  }
+  if (raw.type === "assistant" && Array.isArray(raw.message?.content)) {
+    const text = raw.message.content
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("\n");
+    if (text) {
+      return {
+        kind: "event",
+        type: "agent_message",
+        role: "assistant",
+        content: cappedText(text),
+        data: { status: "completed" },
+      };
+    }
+    const tools = raw.message.content.filter((block) => block?.type === "tool_use");
+    if (tools.length > 0) {
+      return {
+        kind: "event",
+        type: "tool_use",
+        role: "activity",
+        content: cappedText(tools.map((tool) => tool.name).filter(Boolean).join(", ")),
+        data: { status: "started", detail: detailText(tools) },
+      };
+    }
+    return null;
+  }
+  if (raw.type === "result") {
+    const failed = raw.is_error === true || raw.subtype !== "success";
+    return {
+      kind: "event",
+      type: failed ? "turn.failed" : "turn.completed",
+      role: failed ? "error" : "activity",
+      content: failed ? errorMessage(raw.result ?? raw.error) : "",
+      data: {
+        status: failed ? "failed" : "completed",
+        ...(Number.isFinite(raw.duration_ms) ? { durationMs: raw.duration_ms } : {}),
+        ...(Number.isFinite(raw.total_cost_usd) ? { totalCostUsd: raw.total_cost_usd } : {}),
+      },
+    };
+  }
+  return null;
+}
+
 export function spawnCodexTurn({
   executable,
   args,
   prompt,
+  cwd,
   env,
   onRawEvent,
   maxLineBytes = 1_048_576,
+  spawnCommand = spawnCodexCommand,
+  normalizeCommandError = normalizeCodexCommandError,
+  agentLabel = "Codex",
 }) {
-  const child = spawn(executable, args, {
+  const child = spawnCommand(executable, args, {
+    cwd,
     detached: true,
     env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -356,6 +457,14 @@ export function spawnCodexTurn({
   });
 
   function terminateProcessGroup() {
+    if (process.platform === "win32" && Number.isInteger(child.pid)) {
+      const result = spawnSync(
+        "taskkill.exe",
+        ["/pid", String(child.pid), "/t", "/f"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      if (result.status === 0) return;
+    }
     if (Number.isInteger(child.pid)) {
       try {
         process.kill(-child.pid, "SIGKILL");
@@ -367,14 +476,15 @@ export function spawnCodexTurn({
 
   function rejectWithDiagnostic(error) {
     if (settled || fatalError) return;
-    fatalError = error instanceof Error ? error : new Error(String(error));
+    const diagnostic = error instanceof Error ? error : new Error(String(error));
+    fatalError = normalizeCommandError(diagnostic);
     terminateProcessGroup();
   }
 
   function consumeLine(line) {
     if (fatalError) return;
     if (line.length > maxLineBytes) {
-      rejectWithDiagnostic(new Error(`Codex JSONL line exceeded ${maxLineBytes} bytes`));
+      rejectWithDiagnostic(new Error(`${agentLabel} JSONL line exceeded ${maxLineBytes} bytes`));
       return;
     }
     if (line.at(-1) === 13) line = line.subarray(0, -1);
@@ -383,7 +493,7 @@ export function spawnCodexTurn({
     try {
       raw = JSON.parse(line.toString("utf8"));
     } catch {
-      rejectWithDiagnostic(new Error("Codex emitted malformed JSONL"));
+      rejectWithDiagnostic(new Error(`${agentLabel} emitted malformed JSONL`));
       return;
     }
     try {
@@ -402,7 +512,7 @@ export function spawnCodexTurn({
       if (newline === -1) {
         const remainder = bytes.subarray(offset);
         if (stdoutBuffer.length + remainder.length > maxLineBytes) {
-          rejectWithDiagnostic(new Error(`Codex JSONL line exceeded ${maxLineBytes} bytes`));
+          rejectWithDiagnostic(new Error(`${agentLabel} JSONL line exceeded ${maxLineBytes} bytes`));
           return;
         }
         stdoutBuffer = stdoutBuffer.length === 0
@@ -412,7 +522,7 @@ export function spawnCodexTurn({
       }
       const segment = bytes.subarray(offset, newline);
       if (stdoutBuffer.length + segment.length > maxLineBytes) {
-        rejectWithDiagnostic(new Error(`Codex JSONL line exceeded ${maxLineBytes} bytes`));
+        rejectWithDiagnostic(new Error(`${agentLabel} JSONL line exceeded ${maxLineBytes} bytes`));
         return;
       }
       const line = stdoutBuffer.length === 0
@@ -462,4 +572,13 @@ export function spawnCodexTurn({
   child.stdin.end(prompt);
 
   return { child, completion };
+}
+
+export function spawnClaudeTurn(options) {
+  return spawnCodexTurn({
+    ...options,
+    spawnCommand: spawnClaudeCommand,
+    normalizeCommandError: normalizeClaudeCommandError,
+    agentLabel: "Claude Code",
+  });
 }

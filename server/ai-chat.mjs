@@ -3,11 +3,15 @@ import os from "node:os";
 import path from "node:path";
 
 import { ApiError } from "./database.mjs";
-import { discoverAiCatalog, resolveAiWorkspace } from "./ai-chat-catalog.mjs";
+import { discoverAiCatalog, discoverClaudeCatalog, resolveAiWorkspace } from "./ai-chat-catalog.mjs";
 import {
+  buildClaudeArgs,
+  buildClaudePrompt,
   buildCodexArgs,
   buildCodexPrompt,
+  normalizeClaudeEvent,
   normalizeCodexEvent,
+  spawnClaudeTurn,
   spawnCodexTurn,
 } from "./ai-chat-process.mjs";
 
@@ -47,7 +51,9 @@ function wait(milliseconds) {
 export class AiChatService {
   constructor(options) {
     this.database = options.database;
+    this.agentHost = options.agentHost ?? "codex";
     this.codexExecutable = options.codexExecutable;
+    this.claudeExecutable = options.claudeExecutable;
     this.codexStatePath = options.codexStatePath;
     this.manageTaskboardSkillPath = options.manageTaskboardSkillPath;
     this.processEnv = options.processEnv ?? process.env;
@@ -104,6 +110,13 @@ export class AiChatService {
   }
 
   async getCatalog(projectId) {
+    if (this.agentHost === "claude-code") {
+      return discoverClaudeCatalog({
+        codexStatePath: this.codexStatePath,
+        database: this.database,
+        projectId,
+      });
+    }
     return discoverAiCatalog({
       codexExecutable: this.codexExecutable,
       codexStatePath: this.codexStatePath,
@@ -144,6 +157,8 @@ export class AiChatService {
         workspacePath: resolved.workspacePath,
         ...(issue ? { issueId: issue.id, issueIdentifier: issue.identifier } : {}),
       },
+      agentHost: this.agentHost,
+      codexThreadId: input.codexThreadId ?? null,
       model: model.slug,
       reasoningEffort,
       sandbox,
@@ -256,8 +271,12 @@ export class AiChatService {
       imagePaths,
     } = await this.#writeTurnAttachments(attachments);
     try {
-      const args = buildCodexArgs(thread, resolved.addDirectories, imagePaths);
-      const prompt = buildCodexPrompt(
+      const claude = this.agentHost === "claude-code";
+      const args = claude
+        ? buildClaudeArgs(thread, resolved.addDirectories)
+        : buildCodexArgs(thread, resolved.addDirectories, imagePaths);
+      const promptBuilder = claude ? buildClaudePrompt : buildCodexPrompt;
+      const prompt = promptBuilder(
         thread,
         {
           message: input.message,
@@ -291,20 +310,26 @@ export class AiChatService {
       let startedThreadId = null;
       let terminalOutcome = null;
       let terminalError = "";
-      const { child, completion } = spawnCodexTurn({
-        executable: this.codexExecutable,
+      const spawnTurn = claude ? spawnClaudeTurn : spawnCodexTurn;
+      const { child, completion } = spawnTurn({
+        executable: claude ? this.claudeExecutable : this.codexExecutable,
         args,
         prompt,
-        env: this.processEnv,
+        cwd: resolved.workspacePath,
+        env: {
+          ...this.processEnv,
+          TASKBOARD_AGENT_HOST: this.agentHost,
+          ...(claude ? { CODEX_THREAD_ID: thread.id } : {}),
+        },
         onRawEvent: (raw) => {
-          const normalized = normalizeCodexEvent(raw);
+          const normalized = claude ? normalizeClaudeEvent(raw) : normalizeCodexEvent(raw);
           if (!normalized) return;
           if (normalized.kind === "thread.started") {
             if (
               (resumingThreadId && normalized.threadId !== resumingThreadId)
               || (startedThreadId && normalized.threadId !== startedThreadId)
             ) {
-              throw new Error("Codex returned an unexpected thread id");
+              throw new Error(`${claude ? "Claude Code" : "Codex"} returned an unexpected thread id`);
             }
             startedThreadId = normalized.threadId;
             this.database.updateAiChatThread(threadId, { codexThreadId: normalized.threadId });
@@ -318,9 +343,15 @@ export class AiChatService {
             content: normalized.content,
             data: normalized.data,
           });
-          if (raw.type === "turn.completed" && terminalOutcome === null) {
+          const completed = claude
+            ? raw.type === "result" && raw.subtype === "success" && raw.is_error !== true
+            : raw.type === "turn.completed";
+          const failed = claude
+            ? raw.type === "result" && (raw.subtype !== "success" || raw.is_error === true)
+            : raw.type === "turn.failed" || raw.type === "error";
+          if (completed && terminalOutcome === null) {
             terminalOutcome = "completed";
-          } else if (raw.type === "turn.failed" || raw.type === "error") {
+          } else if (failed) {
             terminalOutcome = "failed";
             terminalError ||= normalized.content;
           }
@@ -412,7 +443,9 @@ export class AiChatService {
   }
 
   #resolveModel(catalog, requestedModel) {
-    const model = requestedModel === undefined
+    const model = this.agentHost === "claude-code"
+      ? catalog.models[0]
+      : requestedModel === undefined
       ? catalog.models[0]
       : catalog.models.find((candidate) => candidate.slug === requestedModel);
     if (!model) {
@@ -420,7 +453,7 @@ export class AiChatService {
         400,
         "INVALID_MODEL",
         requestedModel === undefined
-          ? "Codex did not provide an available model"
+          ? `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} did not provide an available model`
           : `Unknown model '${requestedModel}'`,
       );
     }
@@ -527,21 +560,21 @@ export class AiChatService {
       publicError = "Interrupted";
     } else if (error) {
       status = "failed";
-      publicError = cappedError(error) || "Codex turn failed";
+      publicError = cappedError(error) || `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} turn failed`;
     } else if (terminalOutcome() === "failed") {
       status = "failed";
-      publicError = terminalError() || "Codex reported a failed turn";
+      publicError = terminalError() || `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} reported a failed turn`;
     } else if (result.exitCode !== 0) {
       status = "failed";
       publicError = result.exitCode === null
-        ? `Codex exited due to signal ${result.signal ?? "unknown"}`
-        : `Codex exited with code ${result.exitCode}`;
+        ? `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} exited due to signal ${result.signal ?? "unknown"}`
+        : `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} exited with code ${result.exitCode}`;
     } else if (terminalOutcome() !== "completed") {
       status = "failed";
-      publicError = "Codex exited without reporting turn completion";
+      publicError = `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} exited without reporting turn completion`;
     } else if (!resumingThreadId && !startedThreadId()) {
       status = "failed";
-      publicError = "Codex did not provide a thread id";
+      publicError = `${this.agentHost === "claude-code" ? "Claude Code" : "Codex"} did not provide a thread id`;
     } else {
       status = "completed";
     }

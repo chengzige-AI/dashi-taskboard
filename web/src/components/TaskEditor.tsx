@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { ApiError } from "../api";
+import { ApiError, listCodexProjectThreads } from "../api";
 import {
   TASK_PRIORITIES,
   TASK_STATUSES,
   type ActorIdentity,
+  type CodexThreadSummary,
   type DevelopmentContext,
   type DevelopmentScan,
+  type Project,
   type Recurrence,
   type Task,
   type TaskDraft,
@@ -55,16 +57,20 @@ const RECURRENCE_UNITS: Record<Recurrence["unit"], string> = {
 interface TaskEditorProps {
   task: Task | null;
   initialStatus: TaskStatus;
+  projectId: string;
+  projects: Project[];
   labels: string[];
   workflows: WorkflowOption[];
   currentUser: ActorIdentity;
   developmentScan: DevelopmentScan;
   developmentScanLoading: boolean;
+  onProjectChange: (projectId: string) => void;
   onCancel: () => void;
   onSave: (
     draft: TaskDraft,
     attachments: File[],
     inlineImages: PendingInlineImage[],
+    batchTitles?: string[],
   ) => Promise<void>;
 }
 
@@ -104,11 +110,14 @@ function contextLabel(context: DevelopmentContext): string {
 export function TaskEditor({
   task,
   initialStatus,
+  projectId,
+  projects,
   labels: availableLabels,
   workflows,
   currentUser,
   developmentScan,
   developmentScanLoading,
+  onProjectChange,
   onCancel,
   onSave,
 }: TaskEditorProps) {
@@ -116,6 +125,11 @@ export function TaskEditor({
   const titleRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [title, setTitle] = useState(task?.title ?? "");
+  const [batchMode, setBatchMode] = useState(false);
+  const [codexThreads, setCodexThreads] = useState<CodexThreadSummary[]>([]);
+  const [codexThreadsLoading, setCodexThreadsLoading] = useState(false);
+  const [codexThreadId, setCodexThreadId] = useState(task?.codexThreadId ?? "");
+  const [codexThreadName, setCodexThreadName] = useState(task?.codexThreadName ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [descriptionSegments, setDescriptionSegments] = useState<InlineMediaSegment[]>(
     () => createInlineMediaSegments(),
@@ -158,12 +172,32 @@ export function TaskEditor({
     };
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setCodexThreadsLoading(true);
+    listCodexProjectThreads(projectId, controller.signal)
+      .then(setCodexThreads)
+      .catch((caught) => {
+        if (caught instanceof Error && caught.name === "AbortError") return;
+      setError(caught instanceof Error ? caught.message : "无法读取 AI 会话。 ");
+      })
+      .finally(() => setCodexThreadsLoading(false));
+    return () => controller.abort();
+  }, [projectId]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const cleanTitle = title.trim();
+    const batchTitles = batchMode
+      ? title.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+      : [title.trim()].filter(Boolean);
+    const cleanTitle = batchTitles[0] ?? "";
     if (!cleanTitle) {
       setError("请为议题填写一个简短、明确的标题。");
       titleRef.current?.focus();
+      return;
+    }
+    if (batchMode && (attachments.length > 0 || inlineMediaImages(descriptionSegments).length > 0)) {
+      setError("批量创建暂不支持附件，请先移除附件。");
       return;
     }
     if (recurrence && !dueDate) {
@@ -191,7 +225,9 @@ export function TaskEditor({
         developmentContext,
         dueDate: dueDate || null,
         recurrence,
-      }, attachments, inlineMediaImages(descriptionSegments));
+        codexThreadId: codexThreadId || null,
+        codexThreadName: codexThreadId ? codexThreadName : null,
+      }, attachments, inlineMediaImages(descriptionSegments), batchMode ? batchTitles : undefined);
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === "VERSION_CONFLICT") {
         setError("这个议题已在其他位置发生变更，请关闭并刷新后重试。");
@@ -253,8 +289,23 @@ export function TaskEditor({
         <div className="form-body">
           <label className="composer-title">
             <span className="sr-only">标题</span>
-            <input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Issue title" maxLength={240} autoComplete="off" />
+            {batchMode ? (
+              <textarea
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="每行一个任务标题"
+                rows={5}
+              />
+            ) : (
+              <input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Issue title" maxLength={240} autoComplete="off" />
+            )}
           </label>
+          {!task && (
+            <label className="batch-create-toggle">
+              <input type="checkbox" checked={batchMode} onChange={(event) => setBatchMode(event.target.checked)} />
+              <span>批量创建（每行一个任务）</span>
+            </label>
+          )}
           {task ? (
             <label className="composer-description">
               <span className="sr-only">描述</span>
@@ -285,6 +336,44 @@ export function TaskEditor({
 
         <div className="task-form-dock">
           <div className="property-row">
+            {!task && (
+              <label className="property-control property-project">
+                <LinearIcon name="project" />
+                <span className="sr-only">项目</span>
+                <select
+                  aria-label="项目"
+                  value={projectId}
+                  onChange={(event) => {
+                    setWorkflowId("");
+                    setDevelopmentContext(null);
+                    onProjectChange(event.target.value);
+                  }}
+                >
+                  {projects.map((project) => (
+                    <option value={project.id} key={project.id}>{project.name}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <label className="property-control property-codex-thread" title={codexThreadName || undefined}>
+              <LinearIcon name="conversation" />
+          <span className="sr-only">AI 会话</span>
+              <select
+            aria-label="AI 会话"
+                value={codexThreadId}
+                disabled={codexThreadsLoading}
+                onChange={(event) => {
+                  const selected = codexThreads.find((thread) => thread.id === event.target.value);
+                  setCodexThreadId(event.target.value);
+                  setCodexThreadName(selected?.name ?? "");
+                }}
+              >
+            <option value="">{codexThreadsLoading ? "正在读取 AI 会话…" : "自动新建 AI 会话"}</option>
+                {codexThreads.map((thread) => (
+                  <option value={thread.id} key={thread.id}>{thread.name}</option>
+                ))}
+              </select>
+            </label>
             <label className="property-control property-status">
               <LinearStatusIcon status={status} className={`status-icon-${STATUS_DETAILS[status].tone}`} />
               <span className="sr-only">状态</span>

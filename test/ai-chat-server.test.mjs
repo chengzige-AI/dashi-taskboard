@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { createTaskboardServer } from "../server/index.mjs";
+import { createAiProcessEnvironment, createTaskboardServer } from "../server/index.mjs";
 
 async function createServerFixture(host = "127.0.0.1") {
   const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-ai-server-"));
@@ -15,6 +15,8 @@ async function createServerFixture(host = "127.0.0.1") {
   const codexExecutable = path.join(directory, "fake-codex.mjs");
   await writeFile(codexExecutable, `#!/usr/bin/env node
 const args = process.argv.slice(2);
+const workspace = ${JSON.stringify(workspace)};
+const directory = ${JSON.stringify(directory)};
 if (args[0] === "debug") {
   process.stdout.write('{"models":[{"slug":"gpt-real","display_name":"GPT Real","description":"","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}],"service_tiers":[]}]}');
 } else if (args[0] === "app-server") {
@@ -23,7 +25,14 @@ if (args[0] === "debug") {
     while ((i=buffer.indexOf("\\n"))>=0) { const line=buffer.slice(0,i); buffer=buffer.slice(i+1);
       if (!line.trim()) continue; const message=JSON.parse(line);
       if (message.id===1) process.stdout.write('{"id":1,"result":{}}\\n');
-      if (message.id===2) process.stdout.write('{"id":2,"result":{"data":[{"skills":[{"name":"real-skill","enabled":true,"scope":"repo","interface":null}]}]}}\\n');
+      if (message.id===2 && message.method==="skills/list") process.stdout.write('{"id":2,"result":{"data":[{"skills":[{"name":"real-skill","enabled":true,"scope":"repo","interface":null}]}]}}\\n');
+      if (message.id===2 && message.method==="thread/list") process.stdout.write(JSON.stringify({id:2,result:{data:[
+        {id:"project-thread",name:"Project thread",preview:"inside",cwd:workspace,createdAt:1,updatedAt:3,status:{type:"idle"}},
+        {id:"loose-thread",name:"Loose thread",preview:"outside",cwd:directory,createdAt:2,updatedAt:4,status:{type:"idle"}},
+        {id:"automation-thread",name:"<taskboard_context> issue_identifier: LOCAL-9",preview:"Taskboard 服务端自动认领任务",cwd:workspace,createdAt:3,updatedAt:5,status:{type:"idle"}},
+        {id:"broken-title",name:"?????READY????????????????",preview:"",cwd:directory,createdAt:4,updatedAt:6,status:{type:"idle"}},
+        {id:"subagent-thread",name:"Subagent",preview:"hidden",cwd:workspace,parentThreadId:"parent",createdAt:2,updatedAt:5,status:{type:"idle"}}
+      ]}})+"\\n");
     }
   });
 } else {
@@ -105,6 +114,7 @@ async function request(baseUrl, pathname, options = {}) {
 test("loopback AI API freezes server-owned origin and rejects injected execution fields", async () => {
   const fixture = await createServerFixture();
   try {
+    assert.equal(fixture.app.aiChat.processEnv.CODEX_TASKBOARD_URL, fixture.baseUrl);
     const meta = await request(fixture.baseUrl, "/api/meta");
     assert.equal(meta.body.capabilities.localAiChat, true);
     const catalog = await request(fixture.baseUrl, "/api/local/ai/catalog?projectId=local");
@@ -134,14 +144,14 @@ test("loopback AI API freezes server-owned origin and rejects injected execution
 
     const invalidSkill = await request(fixture.baseUrl, `/api/local/ai/threads/${threadId}/turns`, {
       method: "POST",
-      body: { message: "hello", skillIds: ["invented-skill"] },
+      body: { message: "hello \uFFFC", skillIds: ["invented-skill"] },
     });
     assert.equal(invalidSkill.response.status, 400);
     assert.equal(invalidSkill.body.error.code, "INVALID_SKILL");
 
     const turn = await request(fixture.baseUrl, `/api/local/ai/threads/${threadId}/turns`, {
       method: "POST",
-      body: { message: "hello", skillIds: ["real-skill"] },
+      body: { message: "hello \uFFFC", skillIds: ["real-skill"] },
     });
     assert.equal(turn.response.status, 202);
     assert.equal(turn.body.run.threadId, threadId);
@@ -157,6 +167,41 @@ test("loopback AI API freezes server-owned origin and rejects injected execution
   } finally {
     await fixture.close();
   }
+});
+
+test("Codex thread resources group native project and non-project sessions", async () => {
+  const fixture = await createServerFixture();
+  try {
+    const projectThreads = await request(fixture.baseUrl, "/api/local/codex-threads?projectId=local");
+    assert.equal(projectThreads.response.status, 200);
+    assert.deepEqual(projectThreads.body.threads.map((thread) => thread.id), ["project-thread", "automation-thread"]);
+
+    const snapshot = await request(fixture.baseUrl, "/api/local/codex-thread-resources");
+    assert.equal(snapshot.response.status, 200);
+    assert.deepEqual(snapshot.body.projects, [{ id: "local", workspacePath: fixture.workspace }]);
+    assert.deepEqual(snapshot.body.projectThreads.local.map((thread) => thread.id), ["project-thread"]);
+    assert.deepEqual(snapshot.body.unassignedThreads.map((thread) => thread.id), ["loose-thread"]);
+    assert.doesNotMatch(JSON.stringify(snapshot.body), /subagent-thread|automation-thread|broken-title/);
+
+    const rejectedQuery = await request(fixture.baseUrl, "/api/local/codex-thread-resources?projectId=local");
+    assert.equal(rejectedQuery.response.status, 400);
+    assert.equal(rejectedQuery.body.error.code, "UNKNOWN_QUERY_PARAMETER");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Windows AI child environment exposes portable Node and taskctl without duplicate PATH keys", () => {
+  const env = createAiProcessEnvironment({
+    projectRoot: "C:\\taskboard",
+    env: { Path: "C:\\Windows", PATH: "C:\\shadow" },
+    platform: "win32",
+    nodeExecutable: "C:\\taskboard\\.data\\tools\\node\\node.exe",
+  });
+
+  assert.equal(Object.keys(env).filter((key) => key.toLowerCase() === "path").length, 1);
+  assert.equal(env.Path, "C:\\taskboard\\.data\\tools\\node;C:\\Windows");
+  assert.equal(env.CODEX_TASKBOARD_CLI, "C:\\taskboard\\cli\\taskctl.mjs");
 });
 
 test("danger-full-access requires confirmation on every turn and thread settings are validated", async () => {

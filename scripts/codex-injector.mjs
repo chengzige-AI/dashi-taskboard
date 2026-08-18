@@ -58,7 +58,7 @@ function parseArgs(argv) {
     startupToken: null,
     daemon: false,
     screenshot: null,
-    appPath: "/Applications/ChatGPT.app",
+    appPath: process.platform === "darwin" ? "/Applications/ChatGPT.app" : null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -119,6 +119,10 @@ function startTaskboard({ detached }) {
   return spawn(process.execPath, [path.join(projectRoot, "server", "index.mjs")], {
     cwd: projectRoot,
     detached,
+    env: {
+      ...process.env,
+      CODEX_TASKBOARD_HOST: process.env.CODEX_TASKBOARD_HOST ?? "127.0.0.1",
+    },
     stdio: detached ? "ignore" : "inherit",
   });
 }
@@ -185,6 +189,14 @@ function createTaskboardSupervisor({ detached }) {
 }
 
 function codexIsRunning() {
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "tasklist.exe",
+      ["/fi", "IMAGENAME eq ChatGPT.exe", "/fo", "csv", "/nh"],
+      { encoding: "utf8", windowsHide: true },
+    );
+    return result.status === 0 && /"ChatGPT\.exe"/i.test(result.stdout);
+  }
   return spawnSync("/usr/bin/pgrep", ["-x", "ChatGPT"], { stdio: "ignore" }).status === 0;
 }
 
@@ -201,6 +213,52 @@ function launchCodex(appPath, port) {
     ],
     { stdio: "ignore" },
   );
+}
+
+function openTaskboardInBrowser() {
+  const child = spawn("explorer.exe", [taskboardPageUrl], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+async function runWindowsStandalone(options) {
+  const supervisor = createTaskboardSupervisor({ detached: !options.watch });
+  try {
+    await supervisor.ensure({ force: true });
+    if (options.open) openTaskboardInBrowser();
+    console.log(JSON.stringify({
+      mode: "standalone-browser",
+      platform: "win32",
+      taskboardUrl: taskboardPageUrl,
+      embeddedCodexPanel: false,
+    }, null, 2));
+    if (!options.watch) return;
+
+    let stopping = false;
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      supervisor.stop();
+      process.exit(0);
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+
+    while (!stopping) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      try {
+        await supervisor.ensure();
+      } catch (error) {
+        console.error(`Waiting for Taskboard service: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    supervisor.stop();
+    throw error;
+  }
 }
 
 class CdpConnection {
@@ -1198,6 +1256,11 @@ ${runtimeSource}`,
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const cdpVersionUrl = `http://127.0.0.1:${options.port}/json/version`;
+
+  if (process.platform === "win32" && (options.launch || options.daemon)) {
+    await runWindowsStandalone(options);
+    return;
+  }
 
   if (options.daemon) {
     let port = options.port;

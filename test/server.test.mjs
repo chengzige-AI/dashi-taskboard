@@ -21,7 +21,11 @@ afterEach(async () => {
 async function startServer(configure, listenOptions = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-taskboard-test-"));
   const options = configure ? await configure(directory) : {};
-  const app = createTaskboardServer({ dataDirectory: directory, ...options });
+  const app = createTaskboardServer({
+    dataDirectory: directory,
+    codexStatePath: path.join(directory, "codex-state.json"),
+    ...options,
+  });
   const address = await app.listen({ port: 0, ...listenOptions });
   runningApps.push({ app, directory });
   return `http://127.0.0.1:${address.port}`;
@@ -87,6 +91,39 @@ test("health and the default local project are available", async () => {
   assert.equal(result.body.projects[0].name, "Local");
   assert.equal(result.body.projects[0].workspacePath, null);
   assert.equal(result.body.projects[0].issueCount, 0);
+});
+
+test("automation policy accepts known presentation fields from already-open clients", async () => {
+  const baseUrl = await startServer();
+  const legacy = await request(baseUrl, "/api/local/automations/projects/local", {
+    method: "PUT",
+    body: {
+      automationId: "server:local",
+      codexProjectId: "local",
+      status: "PAUSED",
+      enabledByUser: false,
+      quotaAware: false,
+      intervalMinutes: 5,
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+    },
+  });
+  assert.equal(legacy.response.status, 200);
+  assert.equal(legacy.body.policy.enabledByUser, false);
+
+  const unknown = await request(baseUrl, "/api/local/automations/projects/local", {
+    method: "PUT",
+    body: {
+      enabledByUser: false,
+      quotaAware: false,
+      intervalMinutes: 5,
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+      injectedField: true,
+    },
+  });
+  assert.equal(unknown.response.status, 400);
+  assert.equal(unknown.body.error.code, "UNKNOWN_FIELD");
 });
 
 test("workflow workspaces persist centrally with optimistic concurrency", async () => {
@@ -711,18 +748,39 @@ test("workflow capabilities come from the live Codex skill and MCP catalogs", as
   let workspacePath;
   const baseUrl = await startServer(async (directory) => {
     workspacePath = directory;
-    const codexExecutable = path.join(directory, "fake-codex");
-    await writeFile(codexExecutable, `#!/bin/sh
-if [ "$1" = "mcp" ]; then
-  printf '%s\\n' '[{"name":"context7","enabled":true,"transport":{"type":"streamable_http"}},{"name":"disabled-server","enabled":false,"transport":{"type":"stdio"}}]'
-  exit 0
-fi
-while IFS= read -r line; do
-  case "$line" in
-    *'"id":1'*) printf '%s\\n' '{"id":1,"result":{"platformFamily":"unix"}}' ;;
-    *'"id":2'*) printf '%s\\n' '{"id":2,"result":{"data":[{"cwd":"workspace","skills":[{"name":"user-skill","enabled":true,"scope":"user","interface":null},{"name":"repo-skill","enabled":true,"scope":"repo","interface":{"displayName":"Repository Skill"}},{"name":"user-skill","enabled":true,"scope":"system","interface":{"displayName":"Duplicate"}},{"name":"disabled-skill","enabled":false,"scope":"user","interface":null}],"errors":[]}]}}' ;;
-  esac
-done
+    const codexExecutable = path.join(directory, "fake-codex.mjs");
+    await writeFile(codexExecutable, `#!/usr/bin/env node
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+if (process.argv[2] === "mcp") {
+  send([
+    { name: "context7", enabled: true, transport: { type: "streamable_http" } },
+    { name: "disabled-server", enabled: false, transport: { type: "stdio" } },
+  ]);
+  process.exit(0);
+}
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline = buffer.indexOf("\\n");
+  while (newline >= 0) {
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.id === 1) send({ id: 1, result: { platformFamily: process.platform } });
+    if (message.id === 2) send({ id: 2, result: { data: [{
+      cwd: "workspace",
+      skills: [
+        { name: "user-skill", enabled: true, scope: "user", interface: null },
+        { name: "repo-skill", enabled: true, scope: "repo", interface: { displayName: "Repository Skill" } },
+        { name: "user-skill", enabled: true, scope: "system", interface: { displayName: "Duplicate" } },
+        { name: "disabled-skill", enabled: false, scope: "user", interface: null },
+      ],
+      errors: [],
+    }] } });
+    newline = buffer.indexOf("\\n");
+  }
+});
 `);
     await chmod(codexExecutable, 0o755);
     return { codexExecutable };
@@ -735,8 +793,8 @@ done
   assert.equal(result.response.status, 200);
   assert.deepEqual(result.body, {
     skills: [
-      { id: "repo-skill", label: "Repository Skill", scope: "repo" },
-      { id: "user-skill", label: "user-skill", scope: "user" },
+      { id: "repo-skill", label: "Repository Skill", scope: "repo", description: "", path: "" },
+      { id: "user-skill", label: "user-skill", scope: "user", description: "", path: "" },
     ],
     mcpServers: [
       { id: "context7", label: "context7", transport: "streamable_http" },
@@ -760,8 +818,8 @@ test("workflow capability discovery fails instead of inventing fallback options"
     codexExecutable: path.join(directory, "missing-codex"),
   }));
   const result = await request(baseUrl, "/api/workflow-capabilities");
-  assert.equal(result.response.status, 500);
-  assert.equal(result.body.error.code, "INTERNAL_ERROR");
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.error.code, "CODEX_CLI_UNAVAILABLE");
 });
 
 test("existing task and comment thread attribution remains content-specific", async () => {
@@ -1023,6 +1081,55 @@ test("device workspaces come from this machine's Codex project roots", async () 
     "local-project-a": "/Users/alice/project-a",
     "local-project-b": "/Users/alice/project-b",
   });
+});
+
+test("project list imports Codex projects idempotently with readable names", async () => {
+  let alphaWorkspace;
+  const baseUrl = await startServer(async (directory) => {
+    const codexStatePath = path.join(directory, "codex-state.json");
+    alphaWorkspace = path.join(directory, "alpha-app");
+    await writeFile(codexStatePath, JSON.stringify({
+      "local-projects": {
+        "local-project-a": { rootPaths: [alphaWorkspace] },
+        "local-project-b": { rootPaths: [path.join(directory, "beta-agent")] },
+      },
+    }));
+    return { codexStatePath };
+  });
+
+  const first = await request(baseUrl, "/api/projects");
+  const second = await request(baseUrl, "/api/projects");
+  assert.deepEqual(
+    first.body.projects.map((project) => [project.id, project.name]),
+    [
+      ["local", "Local"],
+      ["local-project-a", "alpha-app"],
+      ["local-project-b", "beta-agent"],
+    ],
+  );
+  assert.equal(second.body.projects.length, first.body.projects.length);
+  assert.equal(
+    first.body.projects.find((project) => project.id === "local-project-a").workspacePath,
+    alphaWorkspace,
+  );
+});
+
+test("local project mappings update both project context and device workspaces", async () => {
+  const baseUrl = await startServer();
+  const workspacePath = path.join(os.tmpdir(), "mapped-local-project");
+
+  const mapped = await request(baseUrl, "/api/local/project-mappings/local", {
+    method: "PUT",
+    body: { workspacePath },
+  });
+  assert.equal(mapped.response.status, 200);
+  assert.deepEqual(mapped.body, { projectId: "local", workspacePath });
+
+  const projects = await request(baseUrl, "/api/projects");
+  assert.equal(projects.body.projects[0].workspacePath, workspacePath);
+
+  const workspaces = await request(baseUrl, "/api/device-workspaces");
+  assert.equal(workspaces.body.workspaces.local, workspacePath);
 });
 
 test("accepts private LAN requests and rejects public Host and Origin headers", async () => {

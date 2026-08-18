@@ -19,6 +19,8 @@ interface TaskCardProps {
   isMoving: boolean;
   isSettling: boolean;
   isContextMenuOpen: boolean;
+  isSelected: boolean;
+  dragTaskIds: string[];
   onEdit: (task: Task) => void;
   onContextMenu: (task: Task, position: { x: number; y: number }) => void;
   onMove: (task: Task, status: TaskStatus) => void;
@@ -35,6 +37,8 @@ export function TaskCard({
   isMoving,
   isSettling,
   isContextMenuOpen,
+  isSelected,
+  dragTaskIds,
   onEdit,
   onContextMenu,
   onMove,
@@ -60,7 +64,7 @@ export function TaskCard({
 
   return (
     <article
-      className={`task-card priority-${task.priority}${isDragging ? " is-dragging" : ""}${dragShift ? " is-drag-shifted" : ""}${isMoving ? " is-moving" : ""}${isSettling ? " is-settling" : ""}${isContextMenuOpen ? " is-context-open" : ""}`}
+      className={`task-card priority-${task.priority}${isDragging ? " is-dragging" : ""}${dragShift ? " is-drag-shifted" : ""}${isMoving ? " is-moving" : ""}${isSettling ? " is-settling" : ""}${isContextMenuOpen ? " is-context-open" : ""}${isSelected ? " is-selected" : ""}`}
       style={dragShift ? { transform: `translate3d(0, ${dragShift}px, 0)` } : undefined}
       draggable={!isMoving}
       aria-labelledby={`task-${task.id}-title`}
@@ -75,6 +79,7 @@ export function TaskCard({
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", task.id);
         event.dataTransfer.setData("application/x-taskboard-task", task.id);
+        event.dataTransfer.setData("application/x-taskboard-tasks", JSON.stringify(dragTaskIds));
         onDragStart(task, event.currentTarget.offsetHeight);
       }}
       onDragEnd={onDragEnd}

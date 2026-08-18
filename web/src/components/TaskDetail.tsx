@@ -9,6 +9,8 @@ import {
   deleteComment,
   listAttachments,
   listComments,
+  listTaskDeliverables,
+  openTaskDeliverable,
   uploadAttachment,
   uploadCommentAttachment,
   updateComment,
@@ -23,6 +25,7 @@ import type {
   IssueRelationType,
   Recurrence,
   Task,
+  TaskDeliverable,
   TaskDraft,
   TaskPriority,
   TaskRelationSummary,
@@ -209,6 +212,9 @@ export function TaskDetail({
   const [labelMenuOpen, setLabelMenuOpen] = useState(false);
   const [savingProperty, setSavingProperty] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [deliverables, setDeliverables] = useState<TaskDeliverable[]>([]);
+  const [deliverablesLoading, setDeliverablesLoading] = useState(true);
+  const [openingDeliverable, setOpeningDeliverable] = useState<string | null>(null);
   const [attachmentsLoading, setAttachmentsLoading] = useState(true);
   const [attachmentsError, setAttachmentsError] = useState<string | null>(null);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
@@ -228,6 +234,32 @@ export function TaskDetail({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingBody, setEditingBody] = useState("");
   const [savingCommentId, setSavingCommentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setDeliverablesLoading(true);
+    listTaskDeliverables(task.id, controller.signal)
+      .then(setDeliverables)
+      .catch((error) => {
+        if (error instanceof Error && error.name === "AbortError") return;
+        onError(messageFor(error));
+      })
+      .finally(() => setDeliverablesLoading(false));
+    return () => controller.abort();
+  }, [commentsRevision, task.id]);
+
+  async function openDeliverable(deliverable: TaskDeliverable) {
+    setOpeningDeliverable(deliverable.path);
+    onError(null);
+    try {
+      await openTaskDeliverable(task.id, deliverable.path);
+      onAnnounce(`已在资源管理器中定位 ${deliverable.name}。`);
+    } catch (error) {
+      onError(messageFor(error));
+    } finally {
+      setOpeningDeliverable(null);
+    }
+  }
   const [pendingDelete, setPendingDelete] = useState<Comment | null>(null);
   const [deleting, setDeleting] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement>(null);
@@ -648,6 +680,41 @@ export function TaskDetail({
                     <ConversationLink threadId={currentTask.threadId} onOpen={onOpenThread} />
                   </div>
                 )}
+                {currentTask.codexThreadId && currentTask.codexThreadId !== currentTask.threadId && (
+                  <div className="issue-conversation-list" aria-label="绑定的执行会话">
+                    <span className="codex-binding-label">执行会话：{currentTask.codexThreadName || "AI 会话"}</span>
+                    <ConversationLink threadId={currentTask.codexThreadId} onOpen={onOpenThread} />
+                  </div>
+                )}
+                <section className="deliverables-section" aria-labelledby="deliverables-heading">
+                  <header>
+                    <h2 id="deliverables-heading">交付</h2>
+                    <span>{deliverables.length}</span>
+                  </header>
+                  {deliverablesLoading ? (
+                    <p className="deliverables-empty">正在读取交付文件…</p>
+                  ) : deliverables.length > 0 ? (
+                    <ul>
+                      {deliverables.map((deliverable) => (
+                        <li key={deliverable.path}>
+                          <div>
+                            <strong>{deliverable.name}</strong>
+                            <span title={deliverable.path}>{deliverable.path}</span>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={openingDeliverable === deliverable.path}
+                            onClick={() => void openDeliverable(deliverable)}
+                          >
+                            {openingDeliverable === deliverable.path ? "打开中…" : "定位文件"}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                        <p className="deliverables-empty">AI 修改或生成文件后，会在这里显示。</p>
+                  )}
+                </section>
               </div>
             </article>
 

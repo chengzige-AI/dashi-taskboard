@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
@@ -7,110 +7,88 @@ const apiSource = await readFile(new URL("../web/src/api.ts", import.meta.url), 
 const styles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 const editorSource = await readFile(new URL("../web/src/components/TaskEditor.tsx", import.meta.url), "utf8");
 const detailSource = await readFile(new URL("../web/src/components/TaskDetail.tsx", import.meta.url), "utf8");
-const labelPickerSource = await readFile(new URL("../web/src/components/LabelPicker.tsx", import.meta.url), "utf8");
-const labelsSource = await readFile(new URL("../web/src/labels.ts", import.meta.url), "utf8");
+const statusDockSource = await readFile(new URL("../web/src/components/StatusDock.tsx", import.meta.url), "utf8");
 
-test("the project home merges live Codex projects with persisted Taskboard projects", () => {
+test("the resource library shows only native Codex projects and thread resources", () => {
   assert.match(appSource, /hostContext\?\.projects \?\? \[\]/);
+  assert.match(appSource, /resourceProjectChoices/);
+  assert.match(appSource, /codexThreadResourcesLoaded/);
   assert.match(appSource, /persistedById/);
-  assert.match(appSource, /project\.inCodex \? "Codex 项目" : "已保存的项目"/);
+  assert.match(appSource, /className="project-nav resource-library"/);
+  assert.match(appSource, /application\/x-taskboard-project/);
+  assert.match(appSource, /application\/x-taskboard-codex-thread/);
+  assert.match(appSource, /listCodexThreadResources/);
+  assert.match(appSource, /NON_PROJECT_RESOURCE_ID/);
+  assert.match(appSource, />非项目会话</);
+  assert.match(appSource, /codexThreadResourcesLoaded\s*\? codexResourceProjects\.map/);
+  assert.match(appSource, /CODEX_THREAD_RESOURCE_POLL_MS = 10_000/);
+  assert.match(appSource, /addEventListener\("visibilitychange", refreshWhenVisible\)/);
+  assert.match(appSource, /validThreadKeys/);
+  assert.match(appSource, /setPublisherThreads\(\(current\) =>/);
   assert.match(appSource, /createProjectRequest/);
+  assert.match(apiSource, /export async function listCodexThreadResources/);
   assert.match(apiSource, /export async function createProject/);
 });
 
-test("each device stores an independent workspace path for every project", () => {
-  assert.match(appSource, /const DEVICE_WORKSPACE_PATHS_KEY = "taskboard\.deviceWorkspacePaths\.v1"/);
-  assert.match(appSource, /function readDeviceWorkspacePaths\(\)/);
-  assert.match(appSource, /rememberDeviceWorkspacePath/);
-  assert.match(appSource, /const \[nextProjects, metadata, workspaces\] = await Promise\.all\(\[/);
-  assert.match(appSource, /listDeviceWorkspaces\(signal\)/);
-  assert.match(appSource, /placeholder="设置此设备的项目目录"/);
-  assert.match(appSource, /deviceWorkspacePaths\[selectedProjectId\]/);
-  assert.match(apiSource, /query\.set\("workspacePath", workspacePath\)/);
-  assert.match(apiSource, /\/api\/device-workspaces/);
-  assert.match(styles, /\.project-card-directory \{/);
+test("all issues load into one unified workbench", () => {
+  assert.match(apiSource, /export async function listTasks\(projectId\?: string \| null/);
+  assert.match(apiSource, /if \(projectId\) params\.set\("projectId", projectId\)/);
+  assert.match(appSource, /listTasks\(null, options\.signal\)/);
+  assert.match(appSource, /TASK_STATUSES\.map\(\(status\) => \[status, filteredTasks\.filter/);
+  assert.doesNotMatch(appSource, /changeProject\(saved\.projectId\)/);
 });
 
-test("project selection is remembered until the user explicitly returns home", () => {
-  assert.match(appSource, /const LAST_PROJECT_KEY = "taskboard\.lastProjectId"/);
-  assert.match(appSource, /window\.localStorage\.setItem\(LAST_PROJECT_KEY, projectId\)/);
-  assert.match(appSource, /function returnToProjectHome\(\)/);
-  assert.match(appSource, /window\.localStorage\.removeItem\(LAST_PROJECT_KEY\)/);
-  assert.match(appSource, /aria-label="返回项目首页"/);
-  assert.match(appSource, /className="detail-back-button project-home-button"[\s\S]*?<span>首页<\/span>/);
-  assert.match(styles, /\.project-home-button \{[\s\S]*?width: auto/);
+test("the persistent publisher creates backlog tasks and can bind selected threads", () => {
+  assert.match(appSource, /className="task-publisher"/);
+  assert.match(appSource, /handlePublisherDrop/);
+  assert.match(appSource, /selectedThreadResources/);
+  assert.match(appSource, /status: "backlog"/);
+  assert.match(appSource, /codexThreadId: target\.threadId/);
+  assert.match(styles, /\.task-publisher \{/);
 });
 
-test("the home uses the same restrained surface language as the issue board", () => {
-  assert.match(appSource, /<section className="project-home">/);
-  assert.match(appSource, /title: "已有议题", projects: projectsWithIssues/);
-  assert.match(appSource, /title: "尚未添加议题", projects: projectsWithoutIssues/);
-  assert.match(appSource, /project\.issueCount > 0/);
-  assert.match(styles, /\.project-grid \{[\s\S]*?grid-template-columns:/);
-  assert.match(styles, /\.project-card \{[\s\S]*?border: var\(--border-hairline\)/);
+test("box selection and batch task dragging are wired through the board", () => {
+  assert.match(appSource, /taskSelectionBox/);
+  assert.match(appSource, /updateTaskSelectionFromBox/);
+  assert.match(appSource, /selectedTaskIds/);
+  assert.match(appSource, /finishTaskDrop\(destination: TaskStatus, taskIds: string\[\] \| string/);
+  assert.match(styles, /\.task-selection-marquee/);
+  assert.match(styles, /\.task-card\.is-selected/);
 });
 
-test("new issues stage attachments in the composer and upload them after creation", () => {
-  assert.match(editorSource, /type="file"[\s\S]*?multiple/);
-  assert.match(editorSource, /className="composer-attachment-list"/);
-  assert.match(editorSource, /保存后上传/);
-  assert.match(appSource, /Promise\.allSettled/);
-  assert.match(appSource, /uploadAttachment\(saved\.id, file\)/);
-  assert.match(appSource, /附件上传失败，可在详情页重试/);
+test("new issues can target any synced project while existing issue details stay fixed", () => {
+  assert.match(editorSource, /className="property-control property-project"/);
+  assert.match(editorSource, /projects\.map\(\(project\) =>/);
+  assert.match(editorSource, /onProjectChange\(event\.target\.value\)/);
+  assert.doesNotMatch(detailSource, /project-property-icon|project\.name/);
+  assert.match(appSource, /createTaskRequest\(targetProjectId, draft\)/);
+  assert.match(appSource, /setTasks\(\(current\) => sortTasks\(\[/);
 });
 
-test("the issue composer includes Linear-style labels and scheduling", () => {
-  for (const label of ["缺陷", "特性", "for-claude", "hold", "改进", "phase-1", "phase-6"]) {
-    assert.match(labelsSource, new RegExp(label));
-  }
-  assert.match(editorSource, /<LabelPicker/);
-  assert.match(labelPickerSource, /创建 “\{normalizedSearch\}”/);
-  assert.match(editorSource, /设置截止日期/);
-  assert.match(editorSource, /设置重复/);
-  assert.match(editorSource, /最早截止日期/);
-  assert.match(editorSource, /developmentScan\.contexts/);
+test("the unified workbench keeps three primary columns and opens review states from a compact dock", () => {
+  assert.match(appSource, /const WORKBENCH_STATUSES: TaskStatus\[\] = \["backlog", "todo", "in_progress"\]/);
+  assert.match(appSource, /const STATUS_DOCK_STATUSES: TaskStatus\[\] = \["in_review", "blocked", "done"\]/);
+  assert.match(appSource, /<StatusDock[\s\S]*?activeStatus=\{activeStatusDrawer\}/);
+  assert.match(appSource, /className="status-drawer"/);
+  assert.match(statusDockSource, /onDrop: \(status: TaskStatus, taskId: string\) => void/);
+  assert.match(styles, /\.workbench-board \.board-column \{[\s\S]*?flex: 1 1 0/);
+  assert.match(styles, /\.status-dock \{[\s\S]*?grid-template-rows: repeat\(3/);
 });
 
-test("the current project is shown only in navigation, not in issue creation or detail properties", () => {
-  assert.doesNotMatch(editorSource, /property-project|dialog-project-icon|project\?\.name/);
-  assert.doesNotMatch(detailSource, /detail-property-label">项目|project-property-icon|project\.name/);
-  assert.doesNotMatch(styles, /\.property-project|\.dialog-project-icon|\.project-property-icon/);
-  assert.match(appSource, /createTaskRequest\(selectedProjectId, draft\)/);
-  assert.match(appSource, /className="header-project-switcher"/);
-});
-
-test("the project header exposes real controls instead of decorative actions", () => {
-  assert.match(appSource, /className="header-project-button"[\s\S]*?aria-haspopup="menu"/);
-  assert.match(appSource, /className=\{`favorite-button[\s\S]*?aria-pressed=/);
-  assert.match(appSource, /FAVORITE_PROJECTS_KEY/);
-  assert.match(styles, /\.header-project-menu \{[\s\S]*?-webkit-app-region: no-drag/);
-});
-
-test("the project breadcrumb stops at the project name", () => {
-  assert.match(
-    appSource,
-    /className="detail-back-button project-home-button"[\s\S]*?<span>首页<\/span>[\s\S]*?selectedProjectId && <span className="breadcrumb-chevron"[\s\S]*?className="header-project-switcher"/,
-  );
-  assert.doesNotMatch(appSource, /className="issue-root-button"/);
-  assert.doesNotMatch(appSource, /detailTask\?\.identifier \?\? "议题"/);
-});
-
-test("the collapsed Codex sidebar can be expanded immediately left of Home", () => {
-  assert.match(
-    appSource,
-    /hostContext\?\.sidebarCollapsed[\s\S]*?className="detail-back-button codex-sidebar-expand-button"[\s\S]*?className="detail-back-button project-home-button"/,
-  );
-  assert.match(styles, /\.codex-sidebar-expand-button \+ \.project-home-button \{[\s\S]*?margin-left: 0;/);
-});
-
-test("the project home omits the navigation bar but keeps an invisible drag region", () => {
-  assert.match(appSource, /selectedProjectId \? \([\s\S]*?<header className="workspace-header"/);
-  assert.match(appSource, /className="home-window-drag-region"/);
-  assert.match(styles, /\.home-window-drag-region \{[\s\S]*?position: absolute;[\s\S]*?pointer-events: none/);
-});
-
-test("realtime updates remain active on the project home and reconcile after reconnecting", () => {
+test("realtime task updates refresh the unified task list", () => {
   assert.match(appSource, /useEffect\(\(\) => \{\s*const source = new EventSource\("\/api\/events"\)/);
-  assert.match(appSource, /event\.type\.startsWith\("task\."\)[\s\S]*?scheduleRefresh\(\{ projects: true, tasks: affectsSelectedProject \}\)/);
-  assert.match(appSource, /source\.onopen = \(\) => \{[\s\S]*?scheduleRefresh\(\{ projects: true, tasks: Boolean\(selectedProjectId\) \}\)/);
+  assert.match(appSource, /event\.type\.startsWith\("task\."\)[\s\S]*?scheduleRefresh\(\{ projects: true, tasks: true \}\)/);
+});
+
+test("narrow screens keep the resource library, board, and publisher usable", () => {
+  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.project-nav\.resource-library \{/);
+  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.task-publisher \{/);
+  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.board-column \{/);
+});
+
+test("user-facing Chinese copy is stored as UTF-8 instead of mojibake", () => {
+  assert.match(appSource, />任务面板<\/span>/);
+  assert.match(appSource, />\s*议题看板/);
+  assert.match(appSource, />项目<\/span>/);
+  assert.doesNotMatch(appSource, /浠诲姟|璁|椤圭洰|妯″紡|鎼滅储|鎷栧埌|鈱榋|娓呴櫎/);
 });

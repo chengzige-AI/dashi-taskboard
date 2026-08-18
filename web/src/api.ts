@@ -8,10 +8,13 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexThreadSummary,
+  CodexThreadResourceSnapshot,
   DevelopmentScan,
   IssueRelationType,
   Project,
   Task,
+  TaskDeliverable,
   TaskboardMetadata,
   TaskDraft,
   TaskStatus,
@@ -78,7 +81,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       },
     });
   }
-  const body = (await response.json().catch(() => ({}))) as T & ApiErrorBody;
+  let body: T & ApiErrorBody;
+  try {
+    body = await response.json() as T & ApiErrorBody;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    body = {} as T & ApiErrorBody;
+  }
 
   if (!response.ok) throw new ApiError(response.status, body);
   return body;
@@ -91,6 +100,35 @@ export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
 
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {
   return request<TaskboardMetadata>("/api/meta", { signal });
+}
+
+export async function getProjectAutomation<T>(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  return request<T>(
+    `/api/local/automations/projects/${encodeURIComponent(projectId)}`,
+    { signal },
+  );
+}
+
+export async function updateProjectAutomation<T>(
+  projectId: string,
+  input: {
+    enabledByUser: boolean;
+    quotaAware: boolean;
+    intervalMinutes: number;
+    model: string;
+    reasoningEffort: string;
+  },
+): Promise<T> {
+  return request<T>(
+    `/api/local/automations/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export async function getTaskboardRevision(
@@ -108,6 +146,41 @@ export async function getAiChatCatalog(
   return request<AiChatCatalog>(
     `/api/local/ai/catalog?projectId=${encodeURIComponent(projectId)}`,
     { signal },
+  );
+}
+
+export async function listCodexProjectThreads(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<CodexThreadSummary[]> {
+  const data = await request<{ threads: CodexThreadSummary[] }>(
+    `/api/local/codex-threads?projectId=${encodeURIComponent(projectId)}`,
+    { signal },
+  );
+  return data.threads;
+}
+
+export async function listCodexThreadResources(
+  signal?: AbortSignal,
+): Promise<CodexThreadResourceSnapshot> {
+  return request<CodexThreadResourceSnapshot>("/api/local/codex-thread-resources", { signal });
+}
+
+export async function listTaskDeliverables(
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<TaskDeliverable[]> {
+  const data = await request<{ deliverables: TaskDeliverable[] }>(
+    `/api/local/tasks/${encodeURIComponent(taskId)}/deliverables`,
+    { signal },
+  );
+  return data.deliverables;
+}
+
+export async function openTaskDeliverable(taskId: string, path: string): Promise<void> {
+  await request<{ opened: string }>(
+    `/api/local/tasks/${encodeURIComponent(taskId)}/deliverables/open`,
+    { method: "POST", body: JSON.stringify({ path }) },
   );
 }
 
@@ -282,8 +355,9 @@ export async function listDevelopmentContexts(
   );
 }
 
-export async function listTasks(projectId: string, signal?: AbortSignal): Promise<Task[]> {
-  const params = new URLSearchParams({ projectId, archived: "false" });
+export async function listTasks(projectId?: string | null, signal?: AbortSignal): Promise<Task[]> {
+  const params = new URLSearchParams({ archived: "false" });
+  if (projectId) params.set("projectId", projectId);
   const data = await request<{ tasks: Task[] }>(`/api/tasks?${params}`, { signal });
   return data.tasks;
 }

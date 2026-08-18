@@ -34,6 +34,8 @@ function taskFromRow(row) {
     labels: JSON.parse(row.labels),
     sortOrder: row.sort_order,
     threadId: row.thread_id,
+    codexThreadId: row.codex_thread_id,
+    codexThreadName: row.codex_thread_name,
     creatorType: row.creator_type,
     creatorId: row.creator_id,
     creatorName: row.creator_name,
@@ -141,6 +143,7 @@ function aiChatThreadFromRow(row) {
     id: row.id,
     title: row.title,
     status: row.status,
+    agentHost: row.agent_host ?? "codex",
     origin: {
       projectId: row.origin_project_id,
       projectName: row.origin_project_name,
@@ -154,6 +157,26 @@ function aiChatThreadFromRow(row) {
     sandbox: row.sandbox,
     currentRun: null,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function projectAutomationFromRow(row) {
+  return {
+    projectId: row.project_id,
+    hostType: row.host_type ?? "codex",
+    enabledByUser: Boolean(row.enabled_by_user),
+    quotaAware: Boolean(row.quota_aware),
+    intervalMinutes: row.interval_minutes,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort,
+    nextRunAt: row.next_run_at,
+    lastRunAt: row.last_run_at,
+    lastError: row.last_error,
+    activeTaskId: row.active_task_id,
+    activeThreadId: row.active_thread_id,
+    activeRunId: row.active_run_id,
+    leaseExpiresAt: row.lease_expires_at,
     updatedAt: row.updated_at,
   };
 }
@@ -209,6 +232,8 @@ export class TaskboardDatabase {
         labels TEXT NOT NULL DEFAULT '[]',
         sort_order REAL NOT NULL,
         thread_id TEXT,
+        codex_thread_id TEXT,
+        codex_thread_name TEXT,
         creator_type TEXT NOT NULL DEFAULT 'user',
         creator_id TEXT NOT NULL DEFAULT 'local-user',
         creator_name TEXT NOT NULL DEFAULT '本地用户',
@@ -274,6 +299,7 @@ export class TaskboardDatabase {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('idle', 'running', 'failed')),
+        agent_host TEXT NOT NULL DEFAULT 'codex' CHECK (agent_host IN ('codex', 'claude-code')),
         origin_project_id TEXT NOT NULL,
         origin_project_name TEXT NOT NULL,
         origin_workspace_path TEXT NOT NULL,
@@ -325,7 +351,33 @@ export class TaskboardDatabase {
       CREATE INDEX IF NOT EXISTS ai_chat_events_thread_created
         ON ai_chat_events(thread_id, created_at, id);
 
+      CREATE TABLE IF NOT EXISTS project_automations (
+        project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        host_type TEXT NOT NULL DEFAULT 'codex' CHECK (host_type IN ('codex', 'claude-code')),
+        enabled_by_user INTEGER NOT NULL DEFAULT 0 CHECK (enabled_by_user IN (0, 1)),
+        quota_aware INTEGER NOT NULL DEFAULT 0 CHECK (quota_aware IN (0, 1)),
+        interval_minutes INTEGER NOT NULL CHECK (interval_minutes IN (5, 10, 15, 30, 60)),
+        model TEXT NOT NULL,
+        reasoning_effort TEXT NOT NULL,
+        next_run_at TEXT,
+        last_run_at TEXT,
+        last_error TEXT,
+        active_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+        active_thread_id TEXT REFERENCES ai_chat_threads(id) ON DELETE SET NULL,
+        active_run_id TEXT REFERENCES ai_chat_runs(id) ON DELETE SET NULL,
+        lease_expires_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS project_automations_due
+        ON project_automations(enabled_by_user, quota_aware, next_run_at);
+
     `);
+
+    const automationColumns = this.database.prepare("PRAGMA table_info(project_automations)").all();
+    if (!automationColumns.some((column) => column.name === "host_type")) {
+      this.database.exec("ALTER TABLE project_automations ADD COLUMN host_type TEXT NOT NULL DEFAULT 'codex'");
+    }
 
     const projectColumns = this.database.prepare("PRAGMA table_info(projects)").all();
     if (!projectColumns.some((column) => column.name === "workspace_path")) {
@@ -344,6 +396,17 @@ export class TaskboardDatabase {
         SET thread_id = COALESCE(thread_id, linked_thread_id)
       `);
       this.database.exec("ALTER TABLE tasks DROP COLUMN linked_thread_id");
+    }
+
+    const aiChatThreadColumns = this.database.prepare("PRAGMA table_info(ai_chat_threads)").all();
+    if (!aiChatThreadColumns.some((column) => column.name === "agent_host")) {
+      this.database.exec("ALTER TABLE ai_chat_threads ADD COLUMN agent_host TEXT NOT NULL DEFAULT 'codex'");
+    }
+    if (!taskColumns.some((column) => column.name === "codex_thread_id")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN codex_thread_id TEXT");
+    }
+    if (!taskColumns.some((column) => column.name === "codex_thread_name")) {
+      this.database.exec("ALTER TABLE tasks ADD COLUMN codex_thread_name TEXT");
     }
     if (!taskColumns.some((column) => column.name === "git_branch")) {
       this.database.exec("ALTER TABLE tasks ADD COLUMN git_branch TEXT");
@@ -602,6 +665,27 @@ export class TaskboardDatabase {
     return this.getProject(input.id);
   }
 
+  updateProjectWorkspace(id, workspacePath) {
+    const result = this.database.prepare(`
+      UPDATE projects
+      SET workspace_path = ?, updated_at = ?
+      WHERE id = ?
+    `).run(workspacePath, now(), id);
+    if (result.changes === 0) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${id}' does not exist`);
+    }
+    return this.getProject(id);
+  }
+
+  upsertDiscoveredProject(input) {
+    const existing = this.getProject(input.id);
+    if (!existing) return this.createProject(input);
+    if (existing.workspacePath !== input.workspacePath) {
+      return this.updateProjectWorkspace(input.id, input.workspacePath);
+    }
+    return existing;
+  }
+
   getProject(id) {
     const row = this.database.prepare(`
       SELECT
@@ -694,16 +778,17 @@ export class TaskboardDatabase {
     const timestamp = input.createdAt ?? now();
     this.database.prepare(`
       INSERT INTO ai_chat_threads (
-        id, title, status,
+        id, title, status, agent_host,
         origin_project_id, origin_project_name, origin_workspace_path,
         origin_issue_id, origin_issue_identifier,
         codex_thread_id, model, reasoning_effort, sandbox,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.title,
       input.status ?? "idle",
+      input.agentHost ?? "codex",
       input.origin.projectId,
       input.origin.projectName,
       input.origin.workspacePath,
@@ -879,6 +964,30 @@ export class TaskboardDatabase {
     `).all(threadId).map(aiChatEventFromRow);
   }
 
+  listTaskFileChanges(taskId) {
+    return this.database.prepare(`
+      SELECT ai_chat_events.data, ai_chat_events.created_at, ai_chat_threads.origin_workspace_path
+      FROM ai_chat_events
+      JOIN ai_chat_threads ON ai_chat_threads.id = ai_chat_events.thread_id
+      WHERE ai_chat_threads.origin_issue_id = ?
+        AND ai_chat_events.type = 'file_change'
+      ORDER BY ai_chat_events.created_at, ai_chat_events.rowid
+    `).all(taskId).flatMap((row) => {
+      try {
+        const data = JSON.parse(row.data ?? "null");
+        return Array.isArray(data?.files)
+          ? data.files.map((file) => ({
+              path: file,
+              workspacePath: row.origin_workspace_path,
+              updatedAt: row.created_at,
+            }))
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   interruptAbandonedAiChatRuns() {
     const timestamp = now();
     this.database.exec("BEGIN IMMEDIATE");
@@ -908,6 +1017,277 @@ export class TaskboardDatabase {
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  getProjectAutomation(projectId) {
+    const row = this.database.prepare(`
+      SELECT * FROM project_automations WHERE project_id = ?
+    `).get(projectId);
+    return row ? projectAutomationFromRow(row) : null;
+  }
+
+  upsertProjectAutomation(projectId, input) {
+    const project = this.database.prepare("SELECT id FROM projects WHERE id = ?").get(projectId);
+    if (!project) {
+      throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+    }
+    const timestamp = now();
+    const current = this.getProjectAutomation(projectId);
+    const nextRunAt = input.enabledByUser && !current?.enabledByUser
+      ? timestamp
+      : current?.nextRunAt ?? timestamp;
+    this.database.prepare(`
+      INSERT INTO project_automations (
+        project_id, host_type, enabled_by_user, quota_aware, interval_minutes,
+        model, reasoning_effort, next_run_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        host_type = excluded.host_type,
+        enabled_by_user = excluded.enabled_by_user,
+        quota_aware = excluded.quota_aware,
+        interval_minutes = excluded.interval_minutes,
+        model = excluded.model,
+        reasoning_effort = excluded.reasoning_effort,
+        next_run_at = excluded.next_run_at,
+        updated_at = excluded.updated_at
+    `).run(
+      projectId,
+      input.hostType ?? current?.hostType ?? "codex",
+      input.enabledByUser ? 1 : 0,
+      input.quotaAware ? 1 : 0,
+      input.intervalMinutes,
+      input.model,
+      input.reasoningEffort,
+      nextRunAt,
+      timestamp,
+    );
+    return this.getProjectAutomation(projectId);
+  }
+
+  wakeProjectAutomation(projectId, timestamp = now()) {
+    const result = this.database.prepare(`
+      UPDATE project_automations
+      SET next_run_at = ?, updated_at = ?
+      WHERE project_id = ?
+        AND enabled_by_user = 1
+        AND quota_aware = 0
+        AND active_task_id IS NULL
+    `).run(timestamp, timestamp, projectId);
+    return result.changes > 0;
+  }
+
+  listActiveProjectAutomations() {
+    return this.database.prepare(`
+      SELECT * FROM project_automations
+      WHERE active_task_id IS NOT NULL
+      ORDER BY updated_at, project_id
+    `).all().map(projectAutomationFromRow);
+  }
+
+  listRunnableProjectAutomations(timestamp = now()) {
+    return this.database.prepare(`
+      SELECT * FROM project_automations
+      WHERE enabled_by_user = 1
+        AND quota_aware = 0
+        AND active_task_id IS NULL
+        AND (next_run_at IS NULL OR next_run_at <= ?)
+      ORDER BY COALESCE(next_run_at, ''), project_id
+    `).all(timestamp).map(projectAutomationFromRow);
+  }
+
+  claimNextAutomationTask(projectId, timestamp = now()) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const policyRow = this.database.prepare(`
+        SELECT * FROM project_automations WHERE project_id = ?
+      `).get(projectId);
+      if (
+        !policyRow
+        || !policyRow.enabled_by_user
+        || policyRow.quota_aware
+        || policyRow.active_task_id
+        || (policyRow.next_run_at && policyRow.next_run_at > timestamp)
+      ) {
+        this.database.exec("COMMIT");
+        return null;
+      }
+
+      const nextRunAt = new Date(
+        Date.parse(timestamp) + policyRow.interval_minutes * 60_000,
+      ).toISOString();
+      const taskRow = this.database.prepare(`
+        SELECT tasks.*
+        FROM tasks
+        WHERE tasks.project_id = ?
+          AND tasks.status = 'todo'
+          AND tasks.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM task_relations
+            JOIN tasks AS blocker ON blocker.id = task_relations.source_task_id
+            WHERE task_relations.relation_type = 'blocks'
+              AND task_relations.target_task_id = tasks.id
+              AND blocker.archived_at IS NULL
+              AND blocker.status NOT IN ('done', 'canceled')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ai_chat_threads
+            JOIN ai_chat_runs ON ai_chat_runs.thread_id = ai_chat_threads.id
+            WHERE ai_chat_threads.origin_issue_id = tasks.id
+              AND ai_chat_runs.status = 'running'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ai_chat_threads AS bound_threads
+            JOIN ai_chat_runs AS bound_runs ON bound_runs.thread_id = bound_threads.id
+            WHERE tasks.codex_thread_id IS NOT NULL
+              AND bound_threads.codex_thread_id = tasks.codex_thread_id
+              AND bound_runs.status = 'running'
+          )
+        ORDER BY
+          CASE tasks.priority
+            WHEN 'urgent' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+          END,
+          tasks.sort_order,
+          tasks.created_at,
+          tasks.id
+        LIMIT 1
+      `).get(projectId);
+
+      if (!taskRow) {
+        this.database.prepare(`
+          UPDATE project_automations
+          SET next_run_at = ?, updated_at = ?
+          WHERE project_id = ?
+        `).run(nextRunAt, timestamp, projectId);
+        this.database.exec("COMMIT");
+        return null;
+      }
+
+      const targetOrder = this.database.prepare(`
+        SELECT COALESCE(MAX(sort_order), 0) + 1000 AS value
+        FROM tasks
+        WHERE project_id = ? AND status = 'in_progress' AND archived_at IS NULL
+      `).get(projectId).value;
+      const leaseExpiresAt = new Date(Date.parse(timestamp) + 30 * 60_000).toISOString();
+      const moved = this.database.prepare(`
+        UPDATE tasks
+        SET status = 'in_progress', sort_order = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND version = ? AND status = 'todo' AND archived_at IS NULL
+      `).run(targetOrder, timestamp, taskRow.id, taskRow.version);
+      if (moved.changes !== 1) {
+        this.database.exec("ROLLBACK");
+        return null;
+      }
+      this.database.prepare(`
+        UPDATE project_automations
+        SET
+          active_task_id = ?,
+          active_thread_id = NULL,
+          active_run_id = NULL,
+          lease_expires_at = ?,
+          next_run_at = ?,
+          last_run_at = ?,
+          last_error = NULL,
+          updated_at = ?
+        WHERE project_id = ? AND active_task_id IS NULL
+      `).run(taskRow.id, leaseExpiresAt, nextRunAt, timestamp, timestamp, projectId);
+      this.database.exec("COMMIT");
+      return {
+        task: this.getTask(taskRow.id),
+        policy: this.getProjectAutomation(projectId),
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  attachAutomationRun(projectId, taskId, threadId, runId) {
+    const timestamp = now();
+    const result = this.database.prepare(`
+      UPDATE project_automations
+      SET active_thread_id = ?, active_run_id = ?, updated_at = ?
+      WHERE project_id = ? AND active_task_id = ?
+    `).run(threadId, runId, timestamp, projectId, taskId);
+    if (result.changes !== 1) {
+      throw new ApiError(409, "AUTOMATION_CLAIM_LOST", "Automatic task claim is no longer active");
+    }
+    return this.getProjectAutomation(projectId);
+  }
+
+  renewAutomationLease(projectId, runId) {
+    const timestamp = now();
+    const leaseExpiresAt = new Date(Date.parse(timestamp) + 30 * 60_000).toISOString();
+    this.database.prepare(`
+      UPDATE project_automations
+      SET lease_expires_at = ?, updated_at = ?
+      WHERE project_id = ? AND active_run_id = ?
+    `).run(leaseExpiresAt, timestamp, projectId, runId);
+  }
+
+  finishAutomationRun(projectId, runId, error = null) {
+    const timestamp = now();
+    this.database.prepare(`
+      UPDATE project_automations
+      SET
+        active_task_id = NULL,
+        active_thread_id = NULL,
+        active_run_id = NULL,
+        lease_expires_at = NULL,
+        last_error = ?,
+        updated_at = ?
+      WHERE project_id = ? AND active_run_id = ?
+    `).run(error, timestamp, projectId, runId);
+    return this.getProjectAutomation(projectId);
+  }
+
+  rollbackAutomationClaim(projectId, taskId, error) {
+    const timestamp = now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const policy = this.database.prepare(`
+        SELECT active_task_id, active_run_id FROM project_automations WHERE project_id = ?
+      `).get(projectId);
+      if (policy?.active_task_id !== taskId || policy.active_run_id) {
+        this.database.exec("COMMIT");
+        return null;
+      }
+      const task = this.database.prepare(`SELECT * FROM tasks WHERE id = ?`).get(taskId);
+      if (task?.status === "in_progress") {
+        const targetOrder = this.database.prepare(`
+          SELECT COALESCE(MAX(sort_order), 0) + 1000 AS value
+          FROM tasks
+          WHERE project_id = ? AND status = 'todo' AND archived_at IS NULL
+        `).get(projectId).value;
+        this.database.prepare(`
+          UPDATE tasks
+          SET status = 'todo', sort_order = ?, version = version + 1, updated_at = ?
+          WHERE id = ? AND status = 'in_progress'
+        `).run(targetOrder, timestamp, taskId);
+      }
+      this.database.prepare(`
+        UPDATE project_automations
+        SET
+          active_task_id = NULL,
+          active_thread_id = NULL,
+          active_run_id = NULL,
+          lease_expires_at = NULL,
+          last_error = ?,
+          updated_at = ?
+        WHERE project_id = ?
+      `).run(error, timestamp, projectId);
+      this.database.exec("COMMIT");
+      return this.getTask(taskId);
+    } catch (errorValue) {
+      this.database.exec("ROLLBACK");
+      throw errorValue;
     }
   }
 
@@ -983,12 +1363,13 @@ export class TaskboardDatabase {
       this.database.prepare(`
         INSERT INTO tasks (
           id, identifier, project_id, title, description, status, priority, labels,
-          sort_order, thread_id, creator_type, creator_id, creator_name, creator_avatar_url,
+          sort_order, thread_id, codex_thread_id, codex_thread_name,
+          creator_type, creator_id, creator_name, creator_avatar_url,
           assignee_type, assignee_id, assignee_name, assignee_avatar_url,
           workflow_id, git_branch, worktree_path, worktree_branch,
           due_date, recurrence_interval, recurrence_unit,
           archived_at, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
       `).run(
         id,
         identifier,
@@ -1000,6 +1381,8 @@ export class TaskboardDatabase {
         JSON.stringify(input.labels),
         sortOrder,
         input.threadId ?? null,
+        input.codexThreadId ?? null,
+        input.codexThreadName ?? null,
         input.actor.type,
         input.actor.id,
         input.actor.name,
@@ -1041,6 +1424,8 @@ export class TaskboardDatabase {
       status: "status",
       priority: "priority",
       labels: "labels",
+      codexThreadId: "codex_thread_id",
+      codexThreadName: "codex_thread_name",
       workflowId: "workflow_id",
       dueDate: "due_date",
     };

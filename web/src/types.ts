@@ -203,6 +203,8 @@ export interface Task {
   labels: string[];
   sortOrder: number;
   threadId: string | null;
+  codexThreadId: string | null;
+  codexThreadName: string | null;
   creatorType: ActorType;
   creatorId: string;
   creatorName: string;
@@ -266,6 +268,31 @@ export interface TaskDraft {
   developmentContext: DevelopmentContext | null;
   dueDate: string | null;
   recurrence: Recurrence | null;
+  codexThreadId?: string | null;
+  codexThreadName?: string | null;
+}
+
+export interface CodexThreadSummary {
+  id: string;
+  name: string;
+  preview: string;
+  cwd: string | null;
+  createdAt: number | null;
+  updatedAt: number | null;
+  status: string;
+}
+
+export interface CodexThreadResourceSnapshot {
+  projects: Array<{ id: string; workspacePath: string }>;
+  projectThreads: Record<string, CodexThreadSummary[]>;
+  unassignedThreads: CodexThreadSummary[];
+}
+
+export interface TaskDeliverable {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+  updatedAt: string;
 }
 
 export interface TaskEvent {

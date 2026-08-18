@@ -1,20 +1,42 @@
-# Codex Taskboard
+# Dashi Taskboard
 
-A local-first issue board that runs in a browser and can be embedded in Codex through the standalone CDP launcher or its injection script. The same HTTP API powers the React UI and the `taskctl` CLI used by the bundled Codex Skill.
+A local-first issue board for Codex and Claude Code. Both use the same board and workflow: publish work into backlog, move selected work to todo, let the configured local Agent claim it, then inspect the linked conversation from done or blocked. The Agent type is installation detail and is never shown as a selector in the UI.
 
 ## Requirements
 
 - Node.js 22.5 or newer
 
-## Run locally
+## Let your coding Agent install it
+
+Download or clone the repository, open it in Codex or Claude Code, and ask:
+
+> 安装并启动这个任务看板。
+
+The repository contains `AGENTS.md` and `CLAUDE.md`. The current Agent uses the matching instruction file, explicitly records its own host type under the ignored `.data` directory, installs dependencies, builds the UI, and starts the same local server. It does not guess from other CLIs installed on the machine.
+
+Manual equivalents:
+
+```bash
+# When Codex is doing the installation
+npm run setup:codex
+
+# When Claude Code is doing the installation
+npm run setup:claude
+
+npm install
+npm run build
+npm start
+```
+
+Open <http://127.0.0.1:47823>. The SQLite database and hidden host setting are stored under `.data/`. No Codex or Claude login credential is copied into Taskboard.
+
+## Run locally for development
 
 ```bash
 npm install
 npm run build
 npm start
 ```
-
-Open <http://127.0.0.1:47823>. The SQLite database is stored at `.data/taskboard.sqlite`.
 
 For development with live frontend reload:
 
@@ -44,7 +66,7 @@ npm run taskctl -- issue create \
 
 Use `npm link` if you want `taskctl` on your shell path. Set `CODEX_TASKBOARD_URL` to point the CLI at another local or LAN service. Cloud deployments are configured through the loopback companion with `taskctl cloud login`.
 
-## Install the Codex Skill
+## Install the Codex Skill manually
 
 Copy or symlink `skills/manage-taskboard` into the Codex skills directory, then start a new Codex task:
 
@@ -54,6 +76,37 @@ ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
 ```
 
 The Skill teaches Codex to inspect an issue, move it to `in_progress`, use optimistic versions, verify the work, and then move it to `in_review`; it moves the issue to `done` only after the user explicitly confirms acceptance or asks to mark it complete.
+
+## Windows
+
+Install Node.js 22.5 or newer and either a signed-in standalone Codex CLI or Claude Code. The recommended path is to let that Agent follow the installation instructions above.
+
+To configure and start manually with Codex:
+
+```powershell
+npm install
+npm run build
+npm run setup:codex
+$env:CODEX_TASKBOARD_HOST = "127.0.0.1"
+npm start
+```
+
+With Claude Code, replace `npm run setup:codex` with `npm run setup:claude`. Keep the terminal running while using the board. Automatic execution uses the current Agent's official CLI login and does not bypass its permission system. If the CLI is installed in a custom location, set `CODEX_EXECUTABLE` or `CLAUDE_CODE_EXECUTABLE` to its native executable or Node entry script.
+
+The Microsoft Store Codex app does not expose its packaged `codex.exe` as a normal external CLI, so Codex-based AI Chat and server-side automatic claiming require a standalone Codex CLI such as `npm install --global @openai/codex`.
+
+For a project-private installation under `.data/tools`, launch with `start-taskboard-windows.cmd`. It uses the private Node.js and Codex CLI without changing the system PATH. On the first run it opens the official Codex sign-in flow; after authorization it starts Taskboard automatically.
+
+The **自动认领待办** menu is backed by the local Taskboard service on Windows. Once enabled, it keeps working while the browser page is closed as long as the Taskboard service is running. Each project runs at most one automatic task at a time. The scheduler skips todos with unfinished blockers, atomically moves the selected task to `in_progress`, and starts a linked Agent conversation in that project's working directory. A successful run moves the task to done; a failed run moves it to blocked and records the error.
+
+Install the Taskboard Skill for the Windows Codex app with:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills" | Out-Null
+Copy-Item -Recurse -Force ".\skills\manage-taskboard" "$env:USERPROFILE\.codex\skills\manage-taskboard"
+```
+
+Restart Codex after copying the Skill. The browser board, Skill/CLI workflow, and Taskboard server-side automatic claiming are supported on Windows. The CDP-injected sidebar panel and Codex App's native automation bridge remain macOS-only because the Windows Store app cannot currently be relaunched by this project with Electron remote-debugging flags.
 
 ## Embed in Codex
 
@@ -110,6 +163,9 @@ To use a different UI origin, set `window.__CODEX_TASKBOARD_URL__` before the us
 | `CODEX_TASKBOARD_PORT` | `47823` | Local HTTP port |
 | `CODEX_TASKBOARD_DATA_DIR` | `.data` | SQLite data directory |
 | `CODEX_TASKBOARD_URL` | `http://127.0.0.1:47823` | CLI API origin |
+| `CODEX_EXECUTABLE` | `codex` | Executable Codex CLI path; on Windows it may also point to the standalone package's `codex.js` |
+| `CLAUDE_CODE_EXECUTABLE` | `claude` | Executable Claude Code CLI path; on Windows it may also point to the package's `cli.js` |
+| `TASKBOARD_AGENT_HOST` | local setup value or `codex` | Internal override: `codex` or `claude-code`; not exposed in the UI |
 
 `npm start` prints both the local URL and the available LAN URLs. Teammates on the same trusted network can open one of those LAN URLs and use the same taskboard service. Task, comment, and attachment changes are broadcast to every open client through server-sent events; reconnecting clients perform a full refresh so changes made while disconnected are not missed. A teammate using `taskctl` can point it at the shared service with `CODEX_TASKBOARD_URL=http://<host-ip>:47823`.
 

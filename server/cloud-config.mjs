@@ -1,7 +1,33 @@
+import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
 const CONFIG_VERSION = 1;
+const execFileAsync = promisify(execFile);
+
+async function restrictPrivateFile(filePath) {
+  if (process.platform !== "win32") return;
+  const identityResult = await execFileAsync(
+    "whoami.exe",
+    ["/user", "/fo", "csv", "/nh"],
+    { encoding: "utf8", windowsHide: true },
+  );
+  const sid = identityResult.stdout.match(/"(S-\d+(?:-\d+)+)"/i)?.[1];
+  if (!sid) throw new Error("Could not resolve the current Windows user SID");
+  await execFileAsync(
+    "icacls.exe",
+    [
+      filePath,
+      "/inheritance:r",
+      "/grant:r",
+      `*${sid}:F`,
+      "*S-1-5-18:F",
+      "*S-1-5-32-544:F",
+    ],
+    { windowsHide: true },
+  );
+}
 
 class CloudConfigError extends Error {
   constructor(code, message) {
@@ -131,6 +157,7 @@ export function createCloudConfigStore({ configPath }) {
     await mkdir(path.dirname(configPath), { recursive: true });
     const temporaryPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    await restrictPrivateFile(temporaryPath);
     await rename(temporaryPath, configPath);
   }
 

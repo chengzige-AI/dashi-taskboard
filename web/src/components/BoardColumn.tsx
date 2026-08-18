@@ -32,6 +32,7 @@ interface BoardColumnProps {
   movingTaskId: string | null;
   settlingTaskId: string | null;
   contextMenuTaskId: string | null;
+  selectedTaskIds: Set<string>;
   onCreate: (status: TaskStatus) => void;
   onEdit: (task: Task) => void;
   onContextMenu: (task: Task, position: { x: number; y: number }) => void;
@@ -39,9 +40,11 @@ interface BoardColumnProps {
   onDragStart: (task: Task, height: number) => void;
   onDragEnd: () => void;
   onDragEnter: (status: TaskStatus) => void;
-  onDrop: (status: TaskStatus, taskId: string, beforeTaskId: string | null) => void;
+  onDrop: (status: TaskStatus, taskIds: string[], beforeTaskId: string | null) => void;
   onOpenThread: (threadId: string) => void;
   onHide: (status: TaskStatus) => void;
+  hideable?: boolean;
+  creatable?: boolean;
 }
 
 export function BoardColumn({
@@ -54,6 +57,7 @@ export function BoardColumn({
   movingTaskId,
   settlingTaskId,
   contextMenuTaskId,
+  selectedTaskIds,
   onCreate,
   onEdit,
   onContextMenu,
@@ -64,6 +68,8 @@ export function BoardColumn({
   onDrop,
   onOpenThread,
   onHide,
+  hideable = true,
+  creatable = true,
 }: BoardColumnProps) {
   const details = STATUS_DETAILS[status];
   const [dropBeforeTaskId, setDropBeforeTaskId] = useState<string | null | undefined>();
@@ -90,11 +96,24 @@ export function BoardColumn({
 
   function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
-    const taskId =
-      event.dataTransfer.getData("application/x-taskboard-task") ||
-      event.dataTransfer.getData("text/plain");
-    if (taskId) onDrop(status, taskId, findDropBefore(event.currentTarget, event.clientY));
+    const taskIds = readTaskDragIds(event.dataTransfer);
+    if (taskIds.length > 0) onDrop(status, taskIds, findDropBefore(event.currentTarget, event.clientY));
     setDropBeforeTaskId(undefined);
+  }
+
+  function readTaskDragIds(dataTransfer: DataTransfer): string[] {
+    try {
+      const parsed = JSON.parse(dataTransfer.getData("application/x-taskboard-tasks"));
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string");
+      }
+    } catch {
+      // Older drags only carry the single-task payload.
+    }
+    const taskId =
+      dataTransfer.getData("application/x-taskboard-task") ||
+      dataTransfer.getData("text/plain");
+    return taskId ? [taskId] : [];
   }
 
   function getTaskDragShift(task: Task): number {
@@ -135,7 +154,7 @@ export function BoardColumn({
           <span className="task-count" aria-label={`${tasks.length} 个议题`}>{tasks.length}</span>
         </div>
         <div className="column-actions">
-          {tasks.length > 0 && (
+          {hideable && tasks.length > 0 && (
             <ColumnVisibilityMenu
               label={details.label}
               action="hide"
@@ -143,15 +162,17 @@ export function BoardColumn({
               onAction={() => onHide(status)}
             />
           )}
-          <button
-            type="button"
-            className="icon-button add-task-button"
-            onClick={() => onCreate(status)}
-            aria-label={`在${details.label}中新建议题`}
-            title={`添加到${details.label}`}
-          >
-            <LinearIcon name="plus" />
-          </button>
+          {creatable && (
+            <button
+              type="button"
+              className="icon-button add-task-button"
+              onClick={() => onCreate(status)}
+              aria-label={`在${details.label}中新建议题`}
+              title={`添加到${details.label}`}
+            >
+              <LinearIcon name="plus" />
+            </button>
+          )}
         </div>
       </header>
 
@@ -168,6 +189,12 @@ export function BoardColumn({
               isMoving={movingTaskId === task.id}
               isSettling={settlingTaskId === task.id}
               isContextMenuOpen={contextMenuTaskId === task.id}
+              isSelected={selectedTaskIds.has(task.id)}
+              dragTaskIds={
+                selectedTaskIds.has(task.id) && selectedTaskIds.size > 1
+                  ? [...selectedTaskIds]
+                  : [task.id]
+              }
               onEdit={onEdit}
               onContextMenu={onContextMenu}
               onMove={onMove}

@@ -23,7 +23,8 @@ function workflowStatuses() {
 test("dragging previews the insertion rank before committing it", () => {
   assert.match(boardColumnSource, /function findDropBefore/);
   assert.match(boardColumnSource, /clientY < card\.getBoundingClientRect\(\)\.top \+ card\.offsetHeight \/ 2/);
-  assert.match(boardColumnSource, /onDrop\(status, taskId, findDropBefore/);
+  assert.match(boardColumnSource, /readTaskDragIds/);
+  assert.match(boardColumnSource, /onDrop\(status, taskIds, findDropBefore/);
   assert.match(boardColumnSource, /function getTaskDragShift/);
   assert.match(boardColumnSource, /shift -= dragDistance/);
   assert.match(boardColumnSource, /shift \+= dragDistance/);
@@ -35,7 +36,7 @@ test("dragging previews the insertion rank before committing it", () => {
   assert.match(appSource, /\(previousTask\.sortOrder \+ nextTask\.sortOrder\) \/ 2/);
   assert.match(appSource, /currentOrder\.every\(\(candidate, index\) => candidate\.id === desiredOrder\[index\]\.id\)/);
   assert.match(appSource, /setTasks\(\(current\) => sortTasks\(current\.map/);
-  assert.match(appSource, /setSettlingTaskId\(task\.id\)/);
+  assert.match(appSource, /setSettlingTaskId\(firstTask\.id\)/);
   assert.match(styles, /\.task-card\.is-settling \{[\s\S]*?task-card-settle 200ms/);
 });
 
@@ -171,7 +172,7 @@ test("comments stage, upload, render and delete their own attachments", () => {
   assert.match(apiSource, /\/api\/comments\/\$\{encodeURIComponent\(commentId\)\}\/attachments/);
   assert.match(detailSource, /pendingCommentFiles/);
   assert.match(detailSource, /uploadCommentAttachment\(comment\.id, file\)/);
-  assert.match(detailSource, /comment\.attachments\.map/);
+  assert.match(detailSource, /comment\.attachments[\s\S]*?\.map/);
   assert.match(detailSource, /setPendingAttachmentDelete\(attachment\)/);
 });
 

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
@@ -16,8 +16,24 @@ import {
   isTaskStatus,
 } from "../shared/domain.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
+import { isSupportedModelEffort } from "../shared/taskboard-automation-options.mjs";
 import { AiChatService } from "./ai-chat.mjs";
+import { resolveAiWorkspace } from "./ai-chat-catalog.mjs";
+import { normalizeAgentHost, readAgentHostConfig } from "./agent-host.mjs";
+import {
+  ProjectAutomationScheduler,
+  projectAutomationResponse,
+} from "./automation-scheduler.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
+import { isClaudeCliAvailable, resolveDefaultClaudeExecutable } from "./claude-command.mjs";
+import {
+  execCodexCommand,
+  isCodexCliAvailable,
+  normalizeCodexCommandError,
+  resolveDefaultCodexExecutable,
+  spawnCodexCommand,
+} from "./codex-command.mjs";
+import { listCodexThreadResources, listCodexThreads } from "./codex-thread-catalog.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -46,7 +62,7 @@ const TRUSTED_EMBED_ORIGINS = new Set(["app://-"]);
 const CODEX_AGENT_ACTOR = {
   type: "agent",
   id: "codex-agent",
-  name: "Codex Agent",
+  name: "AI Agent",
   avatarUrl: null,
 };
 const CONTENT_TYPES = new Map([
@@ -568,6 +584,7 @@ function parseTaskCreate(body) {
   assertAllowedKeys(body, new Set([
     "projectId", "title", "description", "status", "priority", "labels", "sortOrder", "threadId",
     "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "codexThreadId", "codexThreadName",
   ]));
   const projectId = validateProjectId(body.projectId ?? DEFAULT_PROJECT_ID);
   const task = {
@@ -584,6 +601,8 @@ function parseTaskCreate(body) {
     developmentContext: parseDevelopmentContext(body.developmentContext ?? null),
     dueDate: parseDueDate(body.dueDate ?? null),
     recurrence: parseRecurrence(body.recurrence ?? null),
+    codexThreadId: parseAiSetting(body.codexThreadId, "codexThreadId", 128) ?? null,
+    codexThreadName: parseAiSetting(body.codexThreadName, "codexThreadName", 240) ?? null,
   };
   if (task.recurrence && !task.dueDate) {
     throw new ApiError(400, "INVALID_FIELD", "A recurring issue requires 'dueDate'");
@@ -596,6 +615,7 @@ function parseTaskPatch(body) {
   assertAllowedKeys(body, new Set([
     "version", "title", "description", "status", "priority", "labels", "threadId",
     "assigneeTarget", "workflowId", "developmentContext", "dueDate", "recurrence",
+    "codexThreadId", "codexThreadName",
   ]));
   const version = parseVersion(body.version);
   const threadId = parseThreadId(body.threadId);
@@ -610,6 +630,8 @@ function parseTaskPatch(body) {
   if (body.developmentContext !== undefined) changes.developmentContext = parseDevelopmentContext(body.developmentContext);
   if (body.dueDate !== undefined) changes.dueDate = parseDueDate(body.dueDate);
   if (body.recurrence !== undefined) changes.recurrence = parseRecurrence(body.recurrence);
+  if (body.codexThreadId !== undefined) changes.codexThreadId = parseAiSetting(body.codexThreadId, "codexThreadId", 128) ?? null;
+  if (body.codexThreadName !== undefined) changes.codexThreadName = parseAiSetting(body.codexThreadName, "codexThreadName", 240) ?? null;
   if (changes.recurrence && body.dueDate === null) {
     throw new ApiError(400, "INVALID_FIELD", "A recurring issue requires 'dueDate'");
   }
@@ -799,6 +821,7 @@ function parseAiThreadCreate(body) {
     "model",
     "reasoningEffort",
     "sandbox",
+    "codexThreadId",
   ]));
   return {
     projectId: validateProjectId(body.projectId),
@@ -807,6 +830,7 @@ function parseAiThreadCreate(body) {
     model: parseAiSetting(body.model, "model", 128),
     reasoningEffort: parseAiSetting(body.reasoningEffort, "reasoningEffort", 64),
     sandbox: parseAiSandbox(body.sandbox),
+    codexThreadId: parseAiSetting(body.codexThreadId, "codexThreadId", 128),
   };
 }
 
@@ -924,6 +948,75 @@ function parseAiTurn(body) {
     skillIds,
     dangerFullAccessConfirmed: body.dangerFullAccessConfirmed,
     attachments,
+  };
+}
+
+async function taskDeliverables(database, task) {
+  const unique = new Map();
+  for (const change of database.listTaskFileChanges(task.id)) {
+    if (typeof change.path !== "string" || !change.path.trim()) continue;
+    const candidate = path.isAbsolute(change.path)
+      ? change.path
+      : path.resolve(change.workspacePath, change.path);
+    let resolvedPath;
+    let info;
+    try {
+      resolvedPath = await realpath(candidate);
+      info = await stat(resolvedPath);
+    } catch {
+      continue;
+    }
+    let workspacePath;
+    try {
+      workspacePath = await realpath(change.workspacePath);
+    } catch {
+      continue;
+    }
+    const relative = path.relative(workspacePath, resolvedPath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    unique.set(resolvedPath.toLowerCase(), {
+      path: resolvedPath,
+      name: path.basename(resolvedPath),
+      kind: info.isDirectory() ? "directory" : "file",
+      updatedAt: change.updatedAt,
+    });
+  }
+  return [...unique.values()].reverse();
+}
+
+function parseProjectAutomation(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "enabledByUser",
+    "quotaAware",
+    "intervalMinutes",
+    "model",
+    "reasoningEffort",
+    // Already-open clients before the policy payload fix still submit these
+    // read-only presentation fields. Accept only these known legacy keys and
+    // discard them below; all other unknown fields remain rejected.
+    "automationId",
+    "codexProjectId",
+    "status",
+  ]));
+  if (typeof body.enabledByUser !== "boolean") {
+    throw new ApiError(400, "INVALID_FIELD", "'enabledByUser' must be a boolean");
+  }
+  if (typeof body.quotaAware !== "boolean") {
+    throw new ApiError(400, "INVALID_FIELD", "'quotaAware' must be a boolean");
+  }
+  if (![5, 10, 15, 30, 60].includes(body.intervalMinutes)) {
+    throw new ApiError(400, "INVALID_FIELD", "'intervalMinutes' must be 5, 10, 15, 30, or 60");
+  }
+  if (!isSupportedModelEffort(body.model, body.reasoningEffort)) {
+    throw new ApiError(400, "INVALID_FIELD", "The selected model does not support this reasoning effort");
+  }
+  return {
+    enabledByUser: body.enabledByUser,
+    quotaAware: body.quotaAware,
+    intervalMinutes: body.intervalMinutes,
+    model: body.model,
+    reasoningEffort: body.reasoningEffort,
   };
 }
 
@@ -1123,7 +1216,7 @@ async function scanDevelopmentContexts(workspacePath) {
 
 async function discoverSkills(codexExecutable, workspacePath) {
   const entries = await new Promise((resolve, reject) => {
-    const child = spawn(codexExecutable, ["app-server", "--stdio"], {
+    const child = spawnCodexCommand(codexExecutable, ["app-server", "--stdio"], {
       cwd: workspacePath,
       stdio: ["pipe", "pipe", "ignore"],
     });
@@ -1137,10 +1230,17 @@ async function discoverSkills(codexExecutable, workspacePath) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      const complete = () => {
+        if (error) reject(normalizeCodexCommandError(error));
+        else resolve(value);
+      };
+      if (child.exitCode !== null) {
+        complete();
+        return;
+      }
+      child.once("close", complete);
       child.stdin.end();
       child.kill("SIGTERM");
-      if (error) reject(error);
-      else resolve(value);
     }
 
     function send(message) {
@@ -1236,7 +1336,7 @@ async function discoverSkills(codexExecutable, workspacePath) {
 }
 
 async function discoverMcpServers(codexExecutable) {
-  const result = await execFileAsync(codexExecutable, ["mcp", "list", "--json"], {
+  const result = await execCodexCommand(codexExecutable, ["mcp", "list", "--json"], {
     timeout: 8_000,
     maxBuffer: 2 * 1024 * 1024,
   });
@@ -1274,6 +1374,10 @@ export function resolveServerOptions(options = {}) {
     ? path.resolve(configuredDataDirectory)
     : path.join(PROJECT_ROOT, ".data");
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const hostConfig = options.agentHost
+    ? { host: normalizeAgentHost(options.agentHost), executable: options.agentExecutable ?? null }
+    : readAgentHostConfig(dataDirectory, options.processEnv ?? process.env);
+  if (!hostConfig.host) throw new Error("TASKBOARD_AGENT_HOST must be 'codex' or 'claude-code'");
   return {
     dataDirectory,
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
@@ -1281,12 +1385,97 @@ export function resolveServerOptions(options = {}) {
     cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
-    codexExecutable: options.codexExecutable ?? process.env.CODEX_EXECUTABLE ?? "codex",
+    agentHost: hostConfig.host,
+    codexExecutable: options.codexExecutable
+      ?? process.env.CODEX_EXECUTABLE
+      ?? (hostConfig.host === "codex" ? hostConfig.executable : null)
+      ?? resolveDefaultCodexExecutable(PROJECT_ROOT),
+    claudeExecutable: options.claudeExecutable
+      ?? process.env.CLAUDE_CODE_EXECUTABLE
+      ?? (hostConfig.host === "claude-code" ? hostConfig.executable : null)
+      ?? resolveDefaultClaudeExecutable(options.processEnv ?? process.env),
     codexStatePath: options.codexStatePath
       ?? path.join(codexHome, ".codex-global-state.json"),
     codexProcessesPath: options.codexProcessesPath
       ?? path.join(codexHome, "process_manager", "chat_processes.json"),
   };
+}
+
+function databaseProjectWorkspaces(database) {
+  return Object.fromEntries(database.listProjects().flatMap((project) => (
+    typeof project.workspacePath === "string" && project.workspacePath.trim()
+      ? [[project.id, project.workspacePath]]
+      : []
+  )));
+}
+
+function listConfiguredAgentThreadResources(database, agentHost) {
+  const projects = database.listProjects().flatMap((project) => (
+    typeof project.workspacePath === "string" && project.workspacePath.trim()
+      ? [{ id: project.id, workspacePath: project.workspacePath }]
+      : []
+  ));
+  const projectThreads = Object.fromEntries(projects.map((project) => [project.id, []]));
+  for (const thread of database.listAiChatThreads()) {
+    if (
+      thread.agentHost !== agentHost
+      || !thread.codexThreadId
+      || thread.origin.issueId
+      || !projectThreads[thread.origin.projectId]
+    ) continue;
+    projectThreads[thread.origin.projectId].push({
+      id: thread.codexThreadId,
+      name: thread.title,
+      cwd: thread.origin.workspacePath,
+      createdAt: Math.floor(Date.parse(thread.createdAt) / 1_000),
+      updatedAt: Math.floor(Date.parse(thread.updatedAt) / 1_000),
+      status: thread.status,
+    });
+  }
+  return { projects, projectThreads, unassignedThreads: [] };
+}
+
+function discoveredProjectName(workspacePath) {
+  const winName = path.win32.basename(workspacePath);
+  const posixName = path.posix.basename(workspacePath);
+  return (winName && winName !== workspacePath ? winName : posixName) || workspacePath;
+}
+
+async function syncCodexProjects(database, codexStatePath) {
+  const workspaces = await readCodexProjectWorkspaces(codexStatePath);
+  for (const [projectId, workspacePath] of Object.entries(workspaces)) {
+    if (!PROJECT_ID_PATTERN.test(projectId)) continue;
+    database.upsertDiscoveredProject({
+      id: projectId,
+      name: discoveredProjectName(workspacePath),
+      workspacePath,
+    });
+  }
+  return workspaces;
+}
+
+export function createAiProcessEnvironment({
+  projectRoot = PROJECT_ROOT,
+  env = process.env,
+  platform = process.platform,
+  nodeExecutable = process.execPath,
+} = {}) {
+  const childEnv = { ...env };
+  const pathApi = platform === "win32" ? path.win32 : path;
+  if (platform === "win32") {
+    const inheritedPath = env.Path ?? env.PATH ?? "";
+    for (const key of Object.keys(childEnv)) {
+      if (key.toLowerCase() === "path") delete childEnv[key];
+    }
+    const nodeDirectory = pathApi.dirname(nodeExecutable);
+    const pathEntries = inheritedPath.split(pathApi.delimiter).filter(Boolean);
+    childEnv.Path = [
+      nodeDirectory,
+      ...pathEntries.filter((entry) => entry.toLowerCase() !== nodeDirectory.toLowerCase()),
+    ].join(pathApi.delimiter);
+  }
+  childEnv.CODEX_TASKBOARD_CLI = pathApi.join(projectRoot, "cli", "taskctl.mjs");
+  return childEnv;
 }
 
 export function resolvePort(value = process.env.CODEX_TASKBOARD_PORT ?? "47823") {
@@ -1307,6 +1496,9 @@ export function resolveHost(value = process.env.CODEX_TASKBOARD_HOST ?? "0.0.0.0
 
 export function createTaskboardServer(options = {}) {
   const resolved = resolveServerOptions(options);
+  const aiProcessEnv = createAiProcessEnvironment({
+    env: options.processEnv ?? process.env,
+  });
   const database = new TaskboardDatabase(resolved.databasePath);
   const events = new EventHub();
   const cloudConfig = options.cloudConfigStore ?? createCloudConfigStore({
@@ -1328,9 +1520,18 @@ export function createTaskboardServer(options = {}) {
   });
   const aiChat = new AiChatService({
     database,
+    agentHost: resolved.agentHost,
     codexExecutable: resolved.codexExecutable,
+    claudeExecutable: resolved.claudeExecutable,
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
+    processEnv: aiProcessEnv,
+  });
+  const automations = new ProjectAutomationScheduler({
+    database,
+    aiChat,
+    events,
+    tickIntervalMs: options.automationTickIntervalMs,
   });
   const aiEventResponses = new Set();
 
@@ -1424,6 +1625,10 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be absolute");
         }
         await cloudConfig.setProjectWorkspace(projectId, workspacePath);
+        if (!capabilityCloudConfig?.remoteUrl) {
+          const project = database.updateProjectWorkspace(projectId, workspacePath);
+          events.emit("project.updated", { project });
+        }
         return sendJson(response, 200, { projectId, workspacePath });
       }
 
@@ -1434,7 +1639,12 @@ export function createTaskboardServer(options = {}) {
         }
         return sendJson(response, 200, {
           manageTaskboardSkillPath: resolved.skillPath,
-          capabilities: { localAiChat: isLoopbackAddress(request.socket.remoteAddress) },
+          capabilities: {
+            localAiChat: isLoopbackAddress(request.socket.remoteAddress)
+              && (resolved.agentHost === "claude-code"
+                ? isClaudeCliAvailable(resolved.claudeExecutable)
+                : isCodexCliAvailable(resolved.codexExecutable)),
+          },
           ...(capabilityCloudConfig?.remoteUrl
             ? {
               mode: "cloud",
@@ -1445,11 +1655,72 @@ export function createTaskboardServer(options = {}) {
         });
       }
 
+      const projectAutomationRoute = pathname.match(/^\/api\/local\/automations\/projects\/([^/]+)$/);
+      if (projectAutomationRoute) {
+        assertNoQuery(url.searchParams, "/api/local/automations/projects/:id");
+        const projectId = validateProjectId(
+          decodeRouteSegment(projectAutomationRoute[1], "Project id"),
+        );
+        if (request.method === "GET") {
+          if (!database.getProject(projectId)) {
+            throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
+          }
+          return sendJson(response, 200, projectAutomationResponse(
+            database.getProjectAutomation(projectId),
+          ));
+        }
+        if (request.method === "PUT") {
+          const policy = database.upsertProjectAutomation(
+            projectId,
+            {
+              ...parseProjectAutomation(await readJson(request)),
+              hostType: resolved.agentHost,
+            },
+          );
+          automations.wake();
+          return sendJson(response, 200, projectAutomationResponse(policy));
+        }
+        return methodNotAllowed(response, ["GET", "PUT"]);
+      }
+
       if (pathname === "/api/local/ai/catalog") {
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         assertAllowedQuery(url.searchParams, new Set(["projectId"]), "GET /api/local/ai/catalog");
         const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
         return sendJson(response, 200, await aiChat.getCatalog(projectId));
+      }
+
+      if (pathname === "/api/local/codex-thread-resources") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertNoQuery(url.searchParams, "GET /api/local/codex-thread-resources");
+        return sendJson(response, 200, resolved.agentHost === "claude-code"
+          ? listConfiguredAgentThreadResources(database, resolved.agentHost)
+          : await listCodexThreadResources({
+              codexExecutable: resolved.codexExecutable,
+              codexHome: path.dirname(resolved.codexStatePath),
+              processEnv: aiProcessEnv,
+              projectWorkspaces: await readCodexProjectWorkspaces(resolved.codexStatePath),
+            }));
+      }
+
+      if (pathname === "/api/local/codex-threads") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertAllowedQuery(url.searchParams, new Set(["projectId"]), "GET /api/local/codex-threads");
+        const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
+        const { workspacePath } = await resolveAiWorkspace(
+          projectId,
+          resolved.codexStatePath,
+          database,
+        );
+        const threads = resolved.agentHost === "claude-code"
+          ? listConfiguredAgentThreadResources(database, resolved.agentHost).projectThreads[projectId] ?? []
+          : await listCodexThreads({
+              codexExecutable: resolved.codexExecutable,
+              codexHome: path.dirname(resolved.codexStatePath),
+              cwd: workspacePath,
+              processEnv: aiProcessEnv,
+            });
+        return sendJson(response, 200, { threads });
       }
 
       if (pathname === "/api/local/ai/threads") {
@@ -1544,7 +1815,12 @@ export function createTaskboardServer(options = {}) {
           throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/device-workspaces does not accept query parameters");
         }
         return sendJson(response, 200, {
-          workspaces: await readCodexProjectWorkspaces(resolved.codexStatePath),
+          workspaces: {
+            ...(resolved.agentHost === "claude-code"
+              ? databaseProjectWorkspaces(database)
+              : await readCodexProjectWorkspaces(resolved.codexStatePath)),
+            ...(capabilityCloudConfig?.projectMappings ?? {}),
+          },
         });
       }
 
@@ -1572,6 +1848,50 @@ export function createTaskboardServer(options = {}) {
         );
       }
 
+      const localDeliverablesRoute = pathname.match(
+        /^\/api\/local\/tasks\/([^/]+)\/deliverables(?:\/(open))?$/,
+      );
+      if (localDeliverablesRoute) {
+        assertNoQuery(url.searchParams, "/api/local/tasks/:id/deliverables");
+        const taskId = decodeRouteSegment(localDeliverablesRoute[1], "Task id");
+        const task = database.getTask(taskId);
+        if (!task) throw new ApiError(404, "TASK_NOT_FOUND", `Task '${taskId}' does not exist`);
+        const deliverables = await taskDeliverables(database, task);
+        if (!localDeliverablesRoute[2] && request.method === "GET") {
+          return sendJson(response, 200, { deliverables });
+        }
+        if (localDeliverablesRoute[2] === "open" && request.method === "POST") {
+          const body = await readJson(request);
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["path"]));
+          const requestedPath = pathField(body.path, "path");
+          const deliverable = deliverables.find((item) => item.path === requestedPath);
+          if (!deliverable) {
+            throw new ApiError(404, "DELIVERABLE_NOT_FOUND", "The task deliverable does not exist");
+          }
+          if (process.platform === "win32") {
+            const explorer = spawn("explorer.exe", [
+              deliverable.kind === "directory" ? deliverable.path : `/select,${deliverable.path}`,
+            ], { detached: true, stdio: "ignore", windowsHide: false });
+            await new Promise((resolve, reject) => {
+              explorer.once("spawn", resolve);
+              explorer.once("error", reject);
+            });
+            explorer.unref();
+          } else if (process.platform === "darwin") {
+            await execFileAsync("open", deliverable.kind === "directory"
+              ? [deliverable.path]
+              : ["-R", deliverable.path]);
+          } else {
+            await execFileAsync("xdg-open", [deliverable.kind === "directory"
+              ? deliverable.path
+              : path.dirname(deliverable.path)]);
+          }
+          return sendJson(response, 200, { opened: deliverable.path });
+        }
+        return methodNotAllowed(response, localDeliverablesRoute[2] ? ["POST"] : ["GET"]);
+      }
+
       let currentCloudConfig = null;
       if (pathname.startsWith("/api/")) {
         currentCloudConfig = await cloudConfig.read();
@@ -1590,6 +1910,9 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "GET") {
           if ([...url.searchParams.keys()].length > 0) {
             throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "GET /api/projects does not accept query parameters");
+          }
+          if (resolved.agentHost === "codex") {
+            await syncCodexProjects(database, resolved.codexStatePath);
           }
           return sendJson(response, 200, { projects: database.listProjects() });
         }
@@ -1690,6 +2013,7 @@ export function createTaskboardServer(options = {}) {
             assignee: resolveAssignee(assigneeTarget, actor),
           });
           events.emit("task.created", { task });
+          if (task.status === "todo") automations.wakeProject(task.projectId);
           return sendJson(response, 201, { task });
         }
         return methodNotAllowed(response, ["GET", "POST"]);
@@ -1993,12 +2317,14 @@ export function createTaskboardServer(options = {}) {
           }
           const task = database.updateTask(id, version, changes, threadId);
           events.emit("task.updated", { task });
+          if (task.status === "todo") automations.wakeProject(task.projectId);
           return sendJson(response, 200, { task });
         }
         if (action === "move" && request.method === "POST") {
           const move = parseMove(await readJson(request));
           const task = database.moveTask(id, move.version, move.status, move.sortOrder, move.threadId);
           events.emit("task.moved", { task });
+          if (task.status === "todo") automations.wakeProject(task.projectId);
           return sendJson(response, 200, { task });
         }
         if (action === "archive" && request.method === "POST") {
@@ -2011,6 +2337,7 @@ export function createTaskboardServer(options = {}) {
           const { version, threadId } = parseArchive(await readJson(request));
           const task = database.restoreTask(id, version, threadId);
           events.emit("task.restored", { task });
+          if (task.status === "todo") automations.wakeProject(task.projectId);
           return sendJson(response, 200, { task });
         }
         return methodNotAllowed(response, action ? ["POST"] : ["GET", "PATCH"]);
@@ -2038,6 +2365,12 @@ export function createTaskboardServer(options = {}) {
         sendJson(response, error.status, payload);
         return;
       }
+      if (error?.code === "CODEX_CLI_UNAVAILABLE") {
+        sendJson(response, 503, {
+          error: { code: error.code, message: error.message },
+        });
+        return;
+      }
       console.error(error);
       sendJson(response, 500, { error: { code: "INTERNAL_ERROR", message: "Internal server error" } });
     }
@@ -2047,6 +2380,7 @@ export function createTaskboardServer(options = {}) {
   return {
     database,
     aiChat,
+    automations,
     server,
     options: resolved,
     async listen({ host = "127.0.0.1", port = resolvePort() } = {}) {
@@ -2067,6 +2401,8 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
+      aiProcessEnv.CODEX_TASKBOARD_URL = `http://127.0.0.1:${server.address().port}`;
+      automations.start();
       return server.address();
     },
     async close() {
@@ -2076,6 +2412,7 @@ export function createTaskboardServer(options = {}) {
           })
         : Promise.resolve();
       events.close();
+      automations.close();
       for (const response of aiEventResponses) response.end();
       aiEventResponses.clear();
       await aiChat.close();

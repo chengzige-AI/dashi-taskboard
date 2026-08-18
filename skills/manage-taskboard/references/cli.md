@@ -2,6 +2,8 @@
 
 `taskctl` emits JSON. Add `--json` when making the output contract explicit.
 
+Taskboard-launched Codex turns expose the CLI module path as `CODEX_TASKBOARD_CLI`. If `taskctl` is not on `PATH`, use `node "$env:CODEX_TASKBOARD_CLI"` as the command prefix in PowerShell, or `node "$CODEX_TASKBOARD_CLI"` in a POSIX shell. The server also supplies `CODEX_TASKBOARD_URL` for the active local companion.
+
 ## Context and projects
 
 ```bash

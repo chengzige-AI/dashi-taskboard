@@ -1,11 +1,13 @@
-import { execFile, spawn } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
+import {
+  execCodexCommand,
+  normalizeCodexCommandError,
+  spawnCodexCommand,
+} from "./codex-command.mjs";
 import { ApiError } from "./database.mjs";
 
-const execFileAsync = promisify(execFile);
 const CATALOG_TIMEOUT_MS = 10_000;
 const CATALOG_MAX_BUFFER = 2 * 1024 * 1024;
 
@@ -117,7 +119,7 @@ function sanitizeModels(value) {
 
 function listSkills(codexExecutable, workspacePath, processEnv) {
   return new Promise((resolve, reject) => {
-    const child = spawn(codexExecutable, ["app-server", "--stdio"], {
+    const child = spawnCodexCommand(codexExecutable, ["app-server", "--stdio"], {
       cwd: workspacePath,
       env: processEnv,
       stdio: ["pipe", "pipe", "ignore"],
@@ -133,10 +135,17 @@ function listSkills(codexExecutable, workspacePath, processEnv) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      const complete = () => {
+        if (error) reject(normalizeCodexCommandError(error));
+        else resolve(value);
+      };
+      if (child.exitCode !== null) {
+        complete();
+        return;
+      }
+      child.once("close", complete);
       child.stdin.end();
       child.kill("SIGTERM");
-      if (error) reject(error);
-      else resolve(value);
     }
 
     function send(message) {
@@ -238,7 +247,7 @@ export async function discoverAiCatalog({
 }) {
   const { workspacePath } = await resolveAiWorkspace(projectId, codexStatePath, database);
   const [modelResult, skillEntries] = await Promise.all([
-    execFileAsync(codexExecutable, ["debug", "models"], {
+    execCodexCommand(codexExecutable, ["debug", "models"], {
       cwd: workspacePath,
       env: processEnv,
       encoding: "utf8",
@@ -252,5 +261,21 @@ export async function discoverAiCatalog({
     models: sanitizeModels(modelCatalog?.models),
     skills: sanitizeSkills(skillEntries),
     sandboxes: ["read-only", "workspace-write", "danger-full-access"],
+  };
+}
+
+export async function discoverClaudeCatalog({ codexStatePath, database, projectId }) {
+  await resolveAiWorkspace(projectId, codexStatePath, database);
+  return {
+    models: [{
+      slug: "default",
+      displayName: "Default",
+      description: "Use the model configured in Claude Code",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      serviceTiers: [],
+    }],
+    skills: [],
+    sandboxes: ["read-only", "workspace-write"],
   };
 }

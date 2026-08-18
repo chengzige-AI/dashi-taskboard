@@ -3,7 +3,13 @@ import { pathToFileURL } from "node:url";
 
 import { createTaskboardServer, resolveHost, resolvePort } from "./app.mjs";
 
-export { createTaskboardServer, resolveHost, resolvePort, resolveServerOptions } from "./app.mjs";
+export {
+  createAiProcessEnvironment,
+  createTaskboardServer,
+  resolveHost,
+  resolvePort,
+  resolveServerOptions,
+} from "./app.mjs";
 
 async function main() {
   const app = createTaskboardServer();
