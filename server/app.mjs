@@ -1019,7 +1019,7 @@ function parseProjectAutomation(body) {
   }
   return {
     enabledByUser: body.enabledByUser,
-    quotaAware: body.quotaAware,
+    quotaAware: false,
     intervalSeconds,
     model: body.model,
     reasoningEffort: body.reasoningEffort,
@@ -1672,17 +1672,18 @@ export function createTaskboardServer(options = {}) {
             throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
           }
           return sendJson(response, 200, projectAutomationResponse(
-            database.getProjectAutomation(projectId),
+            database.syncProjectAutomationsFromGlobal(),
           ));
         }
         if (request.method === "PUT") {
           const policy = database.upsertProjectAutomation(
-            projectId,
+            "local",
             {
               ...parseProjectAutomation(await readJson(request)),
               hostType: resolved.agentHost,
             },
           );
+          database.syncProjectAutomationsFromGlobal();
           automations.wake();
           return sendJson(response, 200, projectAutomationResponse(policy));
         }

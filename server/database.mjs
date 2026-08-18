@@ -667,7 +667,12 @@ export class TaskboardDatabase {
       }
       throw error;
     }
-    return this.getProject(input.id);
+    const project = this.getProject(input.id);
+    const globalAutomation = input.id === "local" ? null : this.getProjectAutomation("local");
+    if (globalAutomation) {
+      this.upsertProjectAutomation(input.id, globalAutomation);
+    }
+    return project;
   }
 
   updateProjectWorkspace(id, workspacePath) {
@@ -1061,7 +1066,7 @@ export class TaskboardDatabase {
       projectId,
       input.hostType ?? current?.hostType ?? "codex",
       input.enabledByUser ? 1 : 0,
-      input.quotaAware ? 1 : 0,
+      0,
       5,
       input.intervalSeconds,
       input.model,
@@ -1072,13 +1077,32 @@ export class TaskboardDatabase {
     return this.getProjectAutomation(projectId);
   }
 
+  syncProjectAutomationsFromGlobal() {
+    const global = this.getProjectAutomation("local");
+    if (!global) return null;
+    for (const project of this.listProjects()) {
+      if (project.id === "local") continue;
+      const current = this.getProjectAutomation(project.id);
+      if (
+        current
+        && current.enabledByUser === global.enabledByUser
+        && current.quotaAware === false
+        && current.intervalSeconds === global.intervalSeconds
+        && current.model === global.model
+        && current.reasoningEffort === global.reasoningEffort
+        && current.hostType === global.hostType
+      ) continue;
+      this.upsertProjectAutomation(project.id, global);
+    }
+    return this.getProjectAutomation("local");
+  }
+
   wakeProjectAutomation(projectId, timestamp = now()) {
     const result = this.database.prepare(`
       UPDATE project_automations
       SET next_run_at = ?, updated_at = ?
       WHERE project_id = ?
         AND enabled_by_user = 1
-        AND quota_aware = 0
         AND active_task_id IS NULL
     `).run(timestamp, timestamp, projectId);
     return result.changes > 0;
@@ -1096,7 +1120,6 @@ export class TaskboardDatabase {
     return this.database.prepare(`
       SELECT * FROM project_automations
       WHERE enabled_by_user = 1
-        AND quota_aware = 0
         AND active_task_id IS NULL
         AND (next_run_at IS NULL OR next_run_at <= ?)
       ORDER BY COALESCE(next_run_at, ''), project_id
@@ -1112,7 +1135,6 @@ export class TaskboardDatabase {
       if (
         !policyRow
         || !policyRow.enabled_by_user
-        || policyRow.quota_aware
         || policyRow.active_task_id
         || (policyRow.next_run_at && policyRow.next_run_at > timestamp)
       ) {

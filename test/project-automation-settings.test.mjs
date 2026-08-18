@@ -18,7 +18,7 @@ const iconSource = await readFile(
 );
 const styles = await readFile(new URL("../web/src/styles.css", import.meta.url), "utf8");
 
-test("project automation state is device-local and scoped by taskboard project", () => {
+test("automation state is device-local and uses one global policy", () => {
   assert.match(appSource, /const PROJECT_AUTOMATIONS_KEY = "taskboard\.projectAutomations\.v1"/);
   assert.match(appSource, /type ProjectAutomationStatus = "ACTIVE" \| "PAUSED"/);
   assert.match(appSource, /automationId\?: string/);
@@ -27,7 +27,8 @@ test("project automation state is device-local and scoped by taskboard project",
   assert.match(appSource, /DEFAULT_AUTOMATION_OPTIONS[\s\S]*?model: "gpt-5\.5"[\s\S]*?reasoningEffort: "high"/);
   assert.match(appSource, /localStorage\.getItem\(PROJECT_AUTOMATIONS_KEY\)/);
   assert.match(appSource, /localStorage\.setItem\(PROJECT_AUTOMATIONS_KEY, JSON\.stringify\(next\)\)/);
-  assert.match(appSource, /projectAutomations\[selectedProjectId\]/);
+  assert.match(appSource, /const GLOBAL_AUTOMATION_PROJECT_ID = "local"/);
+  assert.match(appSource, /projectAutomations\[GLOBAL_AUTOMATION_PROJECT_ID\]/);
 });
 
 test("automation settings use the loopback server policy contract", () => {
@@ -35,19 +36,17 @@ test("automation settings use the loopback server policy contract", () => {
   assert.match(apiSource, /export async function getProjectAutomation/);
   assert.match(apiSource, /export async function updateProjectAutomation/);
   assert.match(apiSource, /method: "PUT"/);
-  assert.match(appSource, /getProjectAutomation<AutomationHostResponse>\(selectedProjectId\)/);
+  assert.match(appSource, /getProjectAutomation<AutomationHostResponse>\(GLOBAL_AUTOMATION_PROJECT_ID\)/);
   assert.match(
     appSource,
-    /updateProjectAutomation<AutomationHostResponse>\(selectedProjectId, \{\s*enabledByUser: options\.enabledByUser,\s*quotaAware: options\.quotaAware,\s*intervalSeconds: options\.intervalSeconds,\s*model: options\.model,\s*reasoningEffort: options\.reasoningEffort,\s*\}\)/s,
+    /updateProjectAutomation<AutomationHostResponse>\(GLOBAL_AUTOMATION_PROJECT_ID, \{\s*enabledByUser: options\.enabledByUser,\s*quotaAware: false,\s*intervalSeconds: options\.intervalSeconds,\s*model: options\.model,\s*reasoningEffort: options\.reasoningEffort,\s*\}\)/s,
   );
 });
 
-test("project mapping is based on exact ids and workspace paths, never project names", () => {
-  assert.match(appSource, /deviceWorkspacePaths\[selectedProject\.id\]/);
-  assert.match(appSource, /hostContext\?\.projectId === selectedProject\.id/);
-  assert.match(appSource, /codexProjectId: selectedProject\.id/);
-  assert.match(appSource, /请先为该项目映射本机目录/);
-  assert.doesNotMatch(appSource, /project\.name === selectedProject\.name/);
+test("global automation is independent of the currently selected project", () => {
+  assert.match(appSource, /codexProjectId: GLOBAL_AUTOMATION_PROJECT_ID/);
+  assert.doesNotMatch(appSource, /codexProjectId: selectedProject\.id/);
+  assert.doesNotMatch(appSource, /请先为该项目映射本机目录/);
 });
 
 test("the project navigation automation menu owns the icon, fields, and accessible popover", () => {
@@ -56,7 +55,8 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.doesNotMatch(menuSource, /statusStarted|statusTodo/);
   assert.match(menuSource, /aria-busy=\{pending/);
   assert.match(menuSource, /自动认领/);
-  assert.match(menuSource, /无自动化/);
+  assert.match(menuSource, /未配置/);
+  assert.doesNotMatch(menuSource, /额度|quota\?\.state|根据额度/);
   assert.doesNotMatch(menuSource, /已开启自动认领|自动认领未开启/);
   assert.match(menuSource, /自动认领开关/);
   assert.match(menuSource, /<option value=\{5\}>5 秒<\/option>/);
@@ -105,7 +105,7 @@ test("the automation menu reuses the Linear switch and keeps form focus chrome s
 test("unavailable automation state has one notice, clears stale errors, and cannot change", () => {
   assert.match(menuSource, /error && error !== unavailableReason/);
   assert.match(menuSource, /const disabled = pending \|\| Boolean\(unavailableReason\)/);
-  assert.equal(menuSource.match(/disabled=\{disabled\}/g)?.length, 5);
+  assert.equal(menuSource.match(/disabled=\{disabled\}/g)?.length, 4);
   const reconcileSource = appSource.slice(
     appSource.indexOf("const reconcileProjectAutomation"),
     appSource.indexOf("const saveProjectAutomation"),
@@ -153,7 +153,7 @@ test("opening settings reads the server policy before using legacy local state",
   assert.match(appSource, /items\.length === 1 \? items\[0\] : undefined/);
   assert.match(appSource, /enabledByUser: policy\.enabledByUser/);
   assert.match(appSource, /intervalSeconds: policy\.intervalSeconds/);
-  assert.match(appSource, /writeProjectAutomation\(selectedProjectId, previousRecord\)/);
+  assert.match(appSource, /writeProjectAutomation\(GLOBAL_AUTOMATION_PROJECT_ID, previousRecord\)/);
 });
 
 test("project mapping changes refresh automation availability without a manual reload", () => {

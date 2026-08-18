@@ -54,6 +54,7 @@ export function TaskCard({
   const activeBlockers = task.relations.blockedBy.filter((issue) => (
     issue.status !== "done" && issue.status !== "canceled"
   )).length;
+  const resultThreadId = task.codexThreadId?.trim() || task.threadId?.trim() || null;
 
   function stopThen(callback: () => void) {
     return (event: MouseEvent<HTMLButtonElement>) => {
@@ -157,13 +158,13 @@ export function TaskCard({
             <LinearIcon name="calendar" /> {dueDate}
           </span>
         )}
-        {task.threadId && (
+        {resultThreadId && (
           <button
             className="thread-link"
             type="button"
-            aria-label={`查看对话 ${task.threadId}`}
-            title={`查看对话 ${task.threadId}`}
-            onClick={stopThen(() => onOpenThread(task.threadId!))}
+            aria-label={`查看对话 ${resultThreadId}`}
+            title={`查看对话 ${resultThreadId}`}
+            onClick={stopThen(() => onOpenThread(resultThreadId))}
           >
             <LinearIcon name="conversation" />
           </button>

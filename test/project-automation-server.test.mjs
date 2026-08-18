@@ -43,6 +43,7 @@ test("server automation atomically claims one unblocked todo and completes it af
     const runnable = database.createTask({
       ...taskInput,
       title: "Runnable",
+      description: "黄金未来还会涨吗\n请直接回答这个问题",
       status: "todo",
       priority: "low",
     });
@@ -60,6 +61,7 @@ test("server automation atomically claims one unblocked todo and completes it af
     assert.equal(contract.item.rrule, "RRULE:FREQ=SECONDLY;INTERVAL=5");
 
     const emitted = [];
+    let receivedTurn = null;
     const aiChat = {
       async createThread(input) {
         return database.createAiChatThread({
@@ -76,7 +78,8 @@ test("server automation atomically claims one unblocked todo and completes it af
           sandbox: input.sandbox,
         });
       },
-      async startTurn(threadId) {
+      async startTurn(threadId, input) {
+        receivedTurn = input;
         database.updateAiChatThread(threadId, { codexThreadId: "codex-new-thread-1" });
         return database.createAiChatRun({ threadId });
       },
@@ -96,6 +99,10 @@ test("server automation atomically claims one unblocked todo and completes it af
     assert.ok(claimedPolicy.activeRunId);
     assert.equal(database.getTask(runnable.id).status, "in_progress");
     assert.equal(database.getTask(blocked.id).status, "todo");
+    assert.deepEqual(receivedTurn, {
+      message: "黄金未来还会涨吗\n请直接回答这个问题",
+      direct: true,
+    });
 
     await scheduler.tick();
     assert.equal(database.getProjectAutomation("project").activeTaskId, runnable.id);
@@ -222,6 +229,84 @@ test("five-second automation claims without a manual wake and never shows a fail
     assert.ok(elapsed >= 4_500, `claimed too early after ${elapsed}ms`);
     assert.ok(elapsed < 6_500, `did not claim within five-second interval (${elapsed}ms)`);
     assert.equal(database.getTask(automaticTask.id).status, "in_progress");
+    scheduler.close();
+  } finally {
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("automation ignores legacy quota settings and retries a capacity failure", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "taskboard-automation-capacity-"));
+  const database = new TaskboardDatabase(path.join(directory, "taskboard.sqlite"));
+  const actor = { type: "user", id: "local-user", name: "Local", avatarUrl: null };
+  try {
+    database.createProject({ id: "project", name: "Project", workspacePath: directory });
+    const task = database.createTask({
+      projectId: "project",
+      title: "Retry after quota recovers",
+      description: "",
+      status: "todo",
+      priority: "high",
+      labels: [],
+      actor,
+      assignee: actor,
+      workflowId: null,
+      developmentContext: null,
+      dueDate: null,
+      recurrence: null,
+    });
+    database.upsertProjectAutomation("local", {
+      enabledByUser: true,
+      quotaAware: true,
+      intervalSeconds: 5,
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+    });
+    assert.equal(database.getProjectAutomation("local").quotaAware, false);
+    assert.equal(projectAutomationResponse(database.getProjectAutomation("local")).item.status, "ACTIVE");
+
+    let quotaAvailable = false;
+    const aiChat = {
+      async createThread(input) {
+        if (!quotaAvailable) throw new Error("429 usage limit reached");
+        return database.createAiChatThread({
+          title: input.title,
+          origin: {
+            projectId: "project",
+            projectName: "Project",
+            workspacePath: directory,
+            issueId: input.issueId,
+            issueIdentifier: task.identifier,
+          },
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          sandbox: input.sandbox,
+        });
+      },
+      async startTurn(threadId) {
+        return database.createAiChatRun({ threadId });
+      },
+      async interrupt() {},
+      async deleteThread(threadId) {
+        database.deleteAiChatThread(threadId);
+      },
+    };
+    const scheduler = new ProjectAutomationScheduler({
+      database,
+      aiChat,
+      events: { emit() {} },
+    });
+
+    await scheduler.tick();
+    assert.equal(database.getProjectAutomation("project").enabledByUser, true);
+    assert.equal(database.getTask(task.id).status, "todo");
+    assert.equal(database.getProjectAutomation("project").activeTaskId, null);
+
+    quotaAvailable = true;
+    database.wakeProjectAutomation("project");
+    await scheduler.tick();
+    assert.equal(database.getTask(task.id).status, "in_progress");
     scheduler.close();
   } finally {
     database.close();

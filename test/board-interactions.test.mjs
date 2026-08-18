@@ -153,6 +153,13 @@ test("issues expose processing conversations without manual binding", () => {
   assert.match(contextMenuSource, /onOpenInThread/);
 });
 
+test("completed tasks open their bound execution conversation before the taskboard attribution thread", () => {
+  assert.match(cardSource, /const resultThreadId = task\.codexThreadId\?\.trim\(\) \|\| task\.threadId\?\.trim\(\) \|\| null/);
+  assert.match(cardSource, /onOpenThread\(resultThreadId\)/);
+  assert.doesNotMatch(cardSource, /onOpenThread\(task\.threadId!/);
+  assert.match(appSource, /const resultThreadId = task\.codexThreadId\?\.trim\(\);[\s\S]*?openThread\(resultThreadId\);[\s\S]*?return;/);
+});
+
 test("issues bind one workflow from the current project's workflow tabs", () => {
   assert.match(typesSource, /export interface Task \{[\s\S]*?workflowId: string \| null/);
   assert.match(typesSource, /export interface TaskDraft \{[\s\S]*?workflowId: string \| null/);

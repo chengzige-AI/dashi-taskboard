@@ -227,6 +227,7 @@ const LAST_PROJECT_KEY = "taskboard.lastProjectId";
 const FAVORITE_PROJECTS_KEY = "taskboard.favoriteProjectIds";
 const DEVICE_WORKSPACE_PATHS_KEY = "taskboard.deviceWorkspacePaths.v1";
 const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
+const GLOBAL_AUTOMATION_PROJECT_ID = "local";
 const DEFAULT_AUTOMATION_OPTIONS = {
   enabledByUser: false,
   quotaAware: false,
@@ -648,19 +649,10 @@ export function App() {
   const editorDeviceWorkspacePath = deviceWorkspacePaths[editorContextProjectId]
     ?? editorContextProject?.workspacePath
     ?? undefined;
-  const selectedProjectAutomation = projectAutomations[selectedProjectId];
+  const selectedProjectAutomation = projectAutomations[GLOBAL_AUTOMATION_PROJECT_ID];
   const automationProjectContext = useMemo(() => {
     if (!isLocalTaskboardOrigin(window.location.origin)) {
       return { unavailableReason: "仅本地任务面板可用" };
-    }
-    if (!selectedProject) return { unavailableReason: "请先选择项目" };
-
-    const workspacePath = deviceWorkspacePaths[selectedProject.id]
-      ?? selectedProject.workspacePath
-      ?? (hostContext?.projectId === selectedProject.id ? hostContext.workspacePath : undefined);
-
-    if (!workspacePath) {
-      return { unavailableReason: "请先为该项目映射本机目录" };
     }
     if (!manageTaskboardSkillPath) {
       return { unavailableReason: "任务面板还没有读取到 Skill 路径" };
@@ -669,16 +661,12 @@ export function App() {
       return { unavailableReason: "Windows 本机未检测到可用的 AI 命令行" };
     }
     return {
-      workspacePath,
-      codexProjectId: selectedProject.id,
+      codexProjectId: GLOBAL_AUTOMATION_PROJECT_ID,
       unavailableReason: null,
     };
   }, [
-    deviceWorkspacePaths,
-    hostContext,
     localAiChatAvailable,
     manageTaskboardSkillPath,
-    selectedProject,
   ]);
   const detailTask = detailTaskIdentifier
     ? tasks.find((task) => task.identifier === detailTaskIdentifier) ?? null
@@ -848,28 +836,24 @@ export function App() {
     _automationId?: string,
   ) => {
     if (
-      !selectedProject
-      || !automationProjectContext.codexProjectId
-      || !automationProjectContext.workspacePath
+      !automationProjectContext.codexProjectId
     ) {
       return Promise.reject(new Error(
         automationProjectContext.unavailableReason ?? "Cannot read project automation settings",
       ));
     }
     if (operation === "list") {
-      return getProjectAutomation<AutomationHostResponse>(selectedProjectId);
+      return getProjectAutomation<AutomationHostResponse>(GLOBAL_AUTOMATION_PROJECT_ID);
     }
-    return updateProjectAutomation<AutomationHostResponse>(selectedProjectId, {
+    return updateProjectAutomation<AutomationHostResponse>(GLOBAL_AUTOMATION_PROJECT_ID, {
       enabledByUser: options.enabledByUser,
-      quotaAware: options.quotaAware,
+      quotaAware: false,
       intervalSeconds: options.intervalSeconds,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
     });
   }, [
     automationProjectContext,
-    selectedProject,
-    selectedProjectId,
   ]);
 
   const reconcileProjectAutomation = useCallback(async () => {
@@ -877,8 +861,8 @@ export function App() {
       setAutomationError(null);
       return;
     }
-    if (!selectedProjectId || !automationProjectContext.codexProjectId || automationRequestInFlightRef.current) return;
-    const stored = projectAutomationsRef.current[selectedProjectId];
+    if (!automationProjectContext.codexProjectId || automationRequestInFlightRef.current) return;
+    const stored = projectAutomationsRef.current[GLOBAL_AUTOMATION_PROJECT_ID];
     automationRequestInFlightRef.current = true;
     setAutomationPending(true);
     setAutomationError(null);
@@ -902,7 +886,7 @@ export function App() {
       const item = (isAutomationHostItem(response.item) ? response.item : undefined)
         ?? items.find((candidate) => candidate.id === policy.automationId)
         ?? (items.length === 1 ? items[0] : undefined);
-      writeProjectAutomation(selectedProjectId, {
+      writeProjectAutomation(GLOBAL_AUTOMATION_PROJECT_ID, {
         automationId: item?.id ?? policy.automationId,
         codexProjectId: automationProjectContext.codexProjectId,
         status: item?.status ?? "PAUSED",
@@ -921,7 +905,6 @@ export function App() {
     }
   }, [
     automationProjectContext,
-    selectedProjectId,
     sendAutomationRequest,
     writeProjectAutomation,
   ]);
@@ -933,10 +916,9 @@ export function App() {
     model: AutomationModel;
     reasoningEffort: AutomationReasoningEffort;
   }) => {
-    const stored = projectAutomations[selectedProjectId];
+    const stored = projectAutomations[GLOBAL_AUTOMATION_PROJECT_ID];
     if (
-      !selectedProjectId
-      || automationProjectContext.unavailableReason
+      automationProjectContext.unavailableReason
       || !automationProjectContext.codexProjectId
       || automationRequestInFlightRef.current
     ) return;
@@ -950,7 +932,7 @@ export function App() {
         setAutomationError(`最近一次自动执行失败：${response.execution.lastError}`);
       }
       const item = isAutomationHostItem(response.item) ? response.item : undefined;
-      writeProjectAutomation(selectedProjectId, {
+      writeProjectAutomation(GLOBAL_AUTOMATION_PROJECT_ID, {
         automationId: item?.id,
         codexProjectId: automationProjectContext.codexProjectId,
         status: item?.status ?? "PAUSED",
@@ -962,7 +944,7 @@ export function App() {
         reasoningEffort: options.reasoningEffort,
       });
     } catch (error) {
-      writeProjectAutomation(selectedProjectId, previousRecord);
+      writeProjectAutomation(GLOBAL_AUTOMATION_PROJECT_ID, previousRecord);
       setAutomationError(error instanceof Error ? error.message : "Cannot update automation");
     } finally {
       automationRequestInFlightRef.current = false;
@@ -971,7 +953,6 @@ export function App() {
   }, [
     automationProjectContext,
     projectAutomations,
-    selectedProjectId,
     sendAutomationRequest,
     writeProjectAutomation,
   ]);
@@ -1816,6 +1797,11 @@ export function App() {
   }
 
   function openTaskInThread(task: Task) {
+    const resultThreadId = task.codexThreadId?.trim();
+    if (resultThreadId) {
+      openThread(resultThreadId);
+      return;
+    }
     if (!manageTaskboardSkillPath) {
       setActionError("Manage Taskboard skill path is not available. Refresh and try again.");
       return;

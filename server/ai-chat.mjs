@@ -276,15 +276,17 @@ export class AiChatService {
         ? buildClaudeArgs(thread, resolved.addDirectories)
         : buildCodexArgs(thread, resolved.addDirectories, imagePaths);
       const promptBuilder = claude ? buildClaudePrompt : buildCodexPrompt;
-      const prompt = promptBuilder(
-        thread,
-        {
-          message: input.message,
-          skills: selectedSkills,
-          attachmentPaths,
-        },
-        this.manageTaskboardSkillPath,
-      );
+      const prompt = input.direct === true
+        ? input.message
+        : promptBuilder(
+            thread,
+            {
+              message: input.message,
+              skills: selectedSkills,
+              attachmentPaths,
+            },
+            this.manageTaskboardSkillPath,
+          );
       const run = this.database.createAiChatRun({ threadId });
       this.#emit(threadId, { type: "ai.run", run });
       const userEventData = {};

@@ -10,7 +10,6 @@ import {
 import { LinearIcon } from "./LinearIcon";
 
 type AutomationStatus = "ACTIVE" | "PAUSED";
-type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
 type IntervalSeconds = 5 | 10 | 30 | 60 | 300 | 600 | 900 | 1800 | 3600;
 
 interface AutomationOptions {
@@ -23,12 +22,6 @@ interface AutomationOptions {
 
 interface AutomationState extends AutomationOptions {
   status: AutomationStatus;
-  quota?: {
-    state: AutomationQuotaState;
-    checkedAt: number;
-    resetsAt?: number;
-    reason?: "api-key";
-  };
 }
 
 interface ProjectAutomationMenuProps {
@@ -72,18 +65,11 @@ export function ProjectAutomationMenu({
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
   const [draft, setDraft] = useState<AutomationOptions>(DEFAULT_OPTIONS);
   const status = automation?.status ?? "PAUSED";
-  const quota = automation?.quota;
   const stateLabel = !automation?.enabledByUser
     ? "已暂停"
-    : automation.quotaAware && quota?.state === "blocked"
-      ? "额度暂停"
-      : automation.quotaAware && quota?.state === "unavailable"
-        ? "额度不可用"
-        : automation.quotaAware && (!quota || quota.state === "unknown")
-          ? "额度未知"
-          : status === "ACTIVE"
-            ? "运行中"
-            : "已暂停";
+    : status === "ACTIVE"
+      ? "运行中"
+      : "启动中";
   const disabled = pending || Boolean(unavailableReason);
 
   useEffect(() => {
@@ -148,11 +134,11 @@ export function ProjectAutomationMenu({
       ref={menuRef}
       className="project-automation-menu no-drag"
       role="dialog"
-      aria-label="自动认领待办设置"
+      aria-label="全局自动认领待办设置"
       style={{ left: position.left, top: position.top, visibility: position.ready ? "visible" : "hidden" }}
     >
       <div className="project-automation-menu-heading">
-        <strong>自动认领待办</strong>
+        <strong>全局自动认领待办</strong>
         <span className={status === "ACTIVE" ? "is-active" : "is-paused"}>
           {stateLabel}
         </span>
@@ -173,38 +159,6 @@ export function ProjectAutomationMenu({
           <span aria-hidden="true" />
         </button>
       </div>
-      <div className="project-automation-switch">
-        <span>根据额度启用/关闭</span>
-        <button
-          type="button"
-          className={`board-setting-switch${draft.quotaAware ? " is-on" : ""}`}
-          role="switch"
-          aria-checked={draft.quotaAware}
-          disabled={disabled}
-          onClick={() => submitChange({
-            ...draft,
-            quotaAware: !draft.quotaAware,
-          })}
-        >
-          <span aria-hidden="true" />
-        </button>
-      </div>
-      {draft.quotaAware && (
-        <div className={`project-automation-quota is-${quota?.state ?? "unknown"}`}>
-          {quota?.state === "available" && "当前额度可用"}
-          {quota?.state === "blocked" && (
-            quota.resetsAt
-              ? `额度已用尽，预计 ${formatResetTime(quota.resetsAt)} 恢复`
-              : "额度已用尽，自动认领已暂停"
-          )}
-          {quota?.state === "unavailable" && (
-            quota.reason === "api-key"
-              ? "API Key 模式不支持读取 Codex App 额度"
-              : "当前账户无法读取额度"
-          )}
-          {(!quota || quota.state === "unknown") && "额度状态未知，自动认领已暂停"}
-        </div>
-      )}
       <label className="project-automation-field">
         <span>间隔</span>
         <select
@@ -265,11 +219,11 @@ export function ProjectAutomationMenu({
         ref={triggerRef}
         type="button"
         className={`project-automation-trigger no-drag ${status === "ACTIVE" ? "is-active" : "is-paused"}`}
-        aria-label={status === "ACTIVE" ? "自动认领" : "无自动化"}
+        aria-label={automation ? stateLabel : "未配置"}
         aria-busy={pending}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={status === "ACTIVE" ? "自动认领" : "无自动化"}
+        title={automation ? stateLabel : "未配置"}
         onClick={() => {
           if (!open) {
             setPosition((current) => ({ ...current, ready: false }));
@@ -279,18 +233,9 @@ export function ProjectAutomationMenu({
         }}
       >
         <LinearIcon name={status === "ACTIVE" ? "play" : "pause"} />
-        <span>{status === "ACTIVE" ? "自动认领" : "无自动化"}</span>
+        <span>{automation ? (automation.enabledByUser ? "自动认领" : "已暂停") : "未配置"}</span>
       </button>
       {menu}
     </>
   );
-}
-
-function formatResetTime(value: number) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value * 1_000));
 }

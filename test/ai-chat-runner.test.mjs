@@ -202,6 +202,11 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
     await waitFor(() => fixture.service.getRun(first.id)?.status !== "running");
     const second = await fixture.service.startTurn(thread.id, { message: "second" });
     await waitFor(() => fixture.service.getRun(second.id)?.status !== "running");
+    const direct = await fixture.service.startTurn(thread.id, {
+      message: "黄金未来还会涨吗",
+      direct: true,
+    });
+    await waitFor(() => fixture.service.getRun(direct.id)?.status !== "running");
 
     const captures = (await readFile(fixture.capturePath, "utf8")).trim().split("\n").map(JSON.parse);
     assert.deepEqual(captures[0].args, [
@@ -230,6 +235,9 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
       "resume", "codex-thread-1", "-",
     ]);
     assert.equal(captures[1].args.includes("--last"), false);
+    assert.equal(captures[2].prompt, "黄金未来还会涨吗");
+    assert.equal(captures[2].prompt.includes("manage-taskboard"), false);
+    assert.equal(captures[2].prompt.includes("taskboard_context"), false);
 
     const snapshot = fixture.service.getThreadSnapshot(thread.id);
     assert.equal(snapshot.thread.codexThreadId, "codex-thread-1");

@@ -12,21 +12,19 @@ function compactError(error) {
   return value.replaceAll(/\s+/g, " ").trim().slice(0, 2_000);
 }
 
-function automationPrompt(task) {
-  return [
-    `执行看板任务 ${task.identifier}：${task.title}`,
-    task.description ? `\n任务说明：\n${task.description}` : "",
-    "",
-    "请先读取任务详情和关联关系，再在绑定项目的工作目录中完成并验证任务。",
-    "使用 taskctl 持续回写重要进展。完成实现和验证后移入审核中；如果无法继续，移入已阻塞并说明原因。",
-  ].join("\n");
+function isRetryableCapacityError(error) {
+  return /(?:quota|rate[\s_-]*limit|usage[\s_-]*limit|credit|too many requests|\b429\b|capacity|overloaded|resource exhausted|额度|限额|用量已达)/i.test(error);
+}
+
+function automationMessage(task) {
+  return task.description.trim() || task.title.trim();
 }
 
 function automationItem(policy) {
   if (!policy) return null;
   return {
     id: `server:${policy.projectId}`,
-    status: policy.enabledByUser && !policy.quotaAware ? "ACTIVE" : "PAUSED",
+    status: policy.enabledByUser ? "ACTIVE" : "PAUSED",
     model: policy.model,
     reasoningEffort: policy.reasoningEffort,
     rrule: `RRULE:FREQ=SECONDLY;INTERVAL=${policy.intervalSeconds}`,
@@ -44,7 +42,7 @@ export function projectAutomationResponse(policy) {
       ? {
           automationId: item.id,
           enabledByUser: policy.enabledByUser,
-          quotaAware: policy.quotaAware,
+          quotaAware: false,
           intervalSeconds: policy.intervalSeconds,
           model: policy.model,
           reasoningEffort: policy.reasoningEffort,
@@ -105,6 +103,7 @@ export class ProjectAutomationScheduler {
   }
 
   async #tick() {
+    this.database.syncProjectAutomationsFromGlobal();
     for (const policy of this.database.listActiveProjectAutomations()) {
       await this.#reconcile(policy);
     }
@@ -128,9 +127,8 @@ export class ProjectAutomationScheduler {
         codexThreadId: task.codexThreadId ?? undefined,
       });
       run = await this.aiChat.startTurn(thread.id, {
-        message: automationPrompt(task),
-        skills: [],
-        attachments: [],
+        message: automationMessage(task),
+        direct: true,
       });
       const activated = this.database.attachAutomationRun(
         task.projectId,
@@ -147,6 +145,7 @@ export class ProjectAutomationScheduler {
       this.events.emit("comment.created", { comment });
     } catch (error) {
       const message = compactError(error);
+      const shouldRetry = isRetryableCapacityError(message);
       if (run) {
         try {
           await this.aiChat.interrupt(run.id);
@@ -156,14 +155,16 @@ export class ProjectAutomationScheduler {
       }
       const restored = this.database.rollbackAutomationClaim(task.projectId, task.id, message);
       if (restored) {
-        const blocked = this.database.moveTask(restored.id, restored.version, "blocked");
-        const comment = this.database.createComment(task.id, {
-          body: `自动执行启动失败：${message}`,
-          threadId: thread?.id ?? null,
-          actor: AI_AGENT_ACTOR,
-        });
-        this.events.emit("task.moved", { task: blocked });
-        this.events.emit("comment.created", { comment });
+        if (!shouldRetry) {
+          const blocked = this.database.moveTask(restored.id, restored.version, "blocked");
+          const comment = this.database.createComment(task.id, {
+            body: `自动执行启动失败：${message}`,
+            threadId: thread?.id ?? null,
+            actor: AI_AGENT_ACTOR,
+          });
+          this.events.emit("task.moved", { task: blocked });
+          this.events.emit("comment.created", { comment });
+        }
       }
       if (thread) {
         try {
@@ -201,19 +202,24 @@ export class ProjectAutomationScheduler {
     if (!task || task.archivedAt) return;
 
     let updated = task;
-    if (failed && task.status !== "blocked") {
+    const shouldRetry = failed && isRetryableCapacityError(error);
+    if (shouldRetry && task.status !== "todo") {
+      updated = this.database.moveTask(task.id, task.version, "todo");
+    } else if (failed && task.status !== "blocked") {
       updated = this.database.moveTask(task.id, task.version, "blocked");
     } else if (!failed && !["done", "canceled"].includes(task.status)) {
       updated = this.database.moveTask(task.id, task.version, "done");
     }
-    const comment = this.database.createComment(task.id, {
-      body: failed
-        ? `自动执行失败：${error}`
-        : "自动执行已完成，结果已写入关联的 AI 会话。",
-      threadId: policy.activeThreadId,
-      actor: AI_AGENT_ACTOR,
-    });
     this.events.emit("task.moved", { task: updated });
-    this.events.emit("comment.created", { comment });
+    if (!shouldRetry) {
+      const comment = this.database.createComment(task.id, {
+        body: failed
+          ? `自动执行失败：${error}`
+          : "自动执行已完成，结果已写入关联的 AI 会话。",
+        threadId: policy.activeThreadId,
+        actor: AI_AGENT_ACTOR,
+      });
+      this.events.emit("comment.created", { comment });
+    }
   }
 }
