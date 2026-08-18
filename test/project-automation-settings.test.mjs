@@ -145,12 +145,14 @@ test("pending completion reconciles the optimistic draft to confirmed host state
   assert.match(menuSource, /disabled=\{disabled\}/);
 });
 
-test("opening settings and changing projects reconcile with the server policy", () => {
-  assert.match(appSource, /stored \? "apply-policy" : "list"/);
-  assert.match(appSource, /items\.find\(\(item\) => item\.id === stored\?\.automationId\)/);
+test("opening settings reads the server policy before using legacy local state", () => {
+  assert.match(appSource, /let response = await sendAutomationRequest\("list", options, stored\?\.automationId\)/);
+  assert.match(appSource, /!isAutomationHostPolicy\(response\.policy\) && stored/);
+  assert.match(appSource, /response = await sendAutomationRequest\("apply-policy", options, stored\.automationId\)/);
+  assert.match(appSource, /items\.find\(\(candidate\) => candidate\.id === policy\.automationId\)/);
   assert.match(appSource, /items\.length === 1 \? items\[0\] : undefined/);
-  assert.match(appSource, /status: item\.status/);
-  assert.match(appSource, /automationId: undefined/);
+  assert.match(appSource, /enabledByUser: policy\.enabledByUser/);
+  assert.match(appSource, /intervalSeconds: policy\.intervalSeconds/);
   assert.match(appSource, /writeProjectAutomation\(selectedProjectId, previousRecord\)/);
 });
 

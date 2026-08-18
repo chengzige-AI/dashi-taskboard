@@ -887,60 +887,31 @@ export function App() {
         status: "PAUSED" as const,
         ...DEFAULT_AUTOMATION_OPTIONS,
       };
-      const response = await sendAutomationRequest(
-        stored ? "apply-policy" : "list",
-        options,
-        stored?.automationId,
-      );
+      let response = await sendAutomationRequest("list", options, stored?.automationId);
+      if (!isAutomationHostPolicy(response.policy) && stored) {
+        response = await sendAutomationRequest("apply-policy", options, stored.automationId);
+      }
       if (response.execution?.lastError) {
         setAutomationError(`最近一次自动执行失败：${response.execution.lastError}`);
       }
       const items = Array.isArray(response.items)
         ? response.items.filter(isAutomationHostItem)
         : [];
-      if (!stored) {
-        const policy = isAutomationHostPolicy(response.policy) ? response.policy : null;
-        if (!policy) return;
-        const item = items.find((candidate) => candidate.id === policy.automationId)
-          ?? (items.length === 1 ? items[0] : undefined);
-        writeProjectAutomation(selectedProjectId, {
-          automationId: item?.id ?? policy.automationId,
-          codexProjectId: automationProjectContext.codexProjectId,
-          status: item?.status ?? "PAUSED",
-          enabledByUser: policy.enabledByUser,
-          quotaAware: policy.quotaAware,
-          intervalSeconds: policy.intervalSeconds,
-          model: policy.model,
-          reasoningEffort: policy.reasoningEffort,
-        });
-        return;
-      }
+      const policy = isAutomationHostPolicy(response.policy) ? response.policy : null;
+      if (!policy) return;
       const item = (isAutomationHostItem(response.item) ? response.item : undefined)
-        ?? items.find((item) => item.id === stored?.automationId)
+        ?? items.find((candidate) => candidate.id === policy.automationId)
         ?? (items.length === 1 ? items[0] : undefined);
-      if (!item) {
-        if (stored) {
-          writeProjectAutomation(selectedProjectId, {
-            ...stored,
-            automationId: undefined,
-            status: "PAUSED",
-            ...(response.quota ? { quota: response.quota } : {}),
-          });
-        }
-        return;
-      }
-      const intervalSeconds = intervalSecondsFromRrule(item.rrule);
-      if (!intervalSeconds) return;
       writeProjectAutomation(selectedProjectId, {
-        automationId: item.id,
+        automationId: item?.id ?? policy.automationId,
         codexProjectId: automationProjectContext.codexProjectId,
-        status: item.status,
-        enabledByUser: stored.enabledByUser,
-        quotaAware: stored.quotaAware,
+        status: item?.status ?? "PAUSED",
+        enabledByUser: policy.enabledByUser,
+        quotaAware: policy.quotaAware,
         ...(response.quota ? { quota: response.quota } : {}),
-        intervalSeconds,
-        model: item.model,
-        reasoningEffort: item.reasoningEffort,
+        intervalSeconds: policy.intervalSeconds,
+        model: policy.model,
+        reasoningEffort: policy.reasoningEffort,
       });
     } catch (error) {
       setAutomationError(error instanceof Error ? error.message : "Cannot read automation status");
