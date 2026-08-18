@@ -11,12 +11,12 @@ import { LinearIcon } from "./LinearIcon";
 
 type AutomationStatus = "ACTIVE" | "PAUSED";
 type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
-type IntervalMinutes = 5 | 10 | 15 | 30 | 60;
+type IntervalSeconds = 5 | 10 | 30 | 60 | 300 | 600 | 900 | 1800 | 3600;
 
 interface AutomationOptions {
   enabledByUser: boolean;
   quotaAware: boolean;
-  intervalMinutes: IntervalMinutes;
+  intervalSeconds: IntervalSeconds;
   model: AutomationModel;
   reasoningEffort: AutomationReasoningEffort;
 }
@@ -43,7 +43,7 @@ interface ProjectAutomationMenuProps {
 const DEFAULT_OPTIONS: AutomationOptions = {
   enabledByUser: false,
   quotaAware: false,
-  intervalMinutes: 5,
+  intervalSeconds: 5,
   model: "gpt-5.5",
   reasoningEffort: "high",
 };
@@ -208,14 +208,22 @@ export function ProjectAutomationMenu({
       <label className="project-automation-field">
         <span>间隔</span>
         <select
-          value={draft.intervalMinutes}
+          value={draft.intervalSeconds}
           disabled={disabled}
           onChange={(event) => submitChange({
             ...draft,
-            intervalMinutes: Number(event.target.value) as IntervalMinutes,
+            intervalSeconds: Number(event.target.value) as IntervalSeconds,
           })}
         >
-          {[5, 10, 15, 30, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} 分钟</option>)}
+          <option value={5}>5 秒</option>
+          <option value={10}>10 秒</option>
+          <option value={30}>30 秒</option>
+          <option value={60}>1 分钟</option>
+          <option value={300}>5 分钟</option>
+          <option value={600}>10 分钟</option>
+          <option value={900}>15 分钟</option>
+          <option value={1800}>30 分钟</option>
+          <option value={3600}>60 分钟</option>
         </select>
       </label>
       <label className="project-automation-field">

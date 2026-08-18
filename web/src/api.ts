@@ -117,7 +117,7 @@ export async function updateProjectAutomation<T>(
   input: {
     enabledByUser: boolean;
     quotaAware: boolean;
-    intervalMinutes: number;
+    intervalSeconds: number;
     model: string;
     reasoningEffort: string;
   },

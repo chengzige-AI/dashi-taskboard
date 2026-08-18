@@ -155,7 +155,7 @@ interface UndoNotice {
 
 type ProjectAutomationStatus = "ACTIVE" | "PAUSED";
 type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
-type AutomationIntervalMinutes = 5 | 10 | 15 | 30 | 60;
+type AutomationIntervalSeconds = 5 | 10 | 30 | 60 | 300 | 600 | 900 | 1800 | 3600;
 
 interface AutomationQuotaStatus {
   state: AutomationQuotaState;
@@ -171,7 +171,7 @@ interface ProjectAutomationRecord {
   enabledByUser: boolean;
   quotaAware: boolean;
   quota?: AutomationQuotaStatus;
-  intervalMinutes: AutomationIntervalMinutes;
+  intervalSeconds: AutomationIntervalSeconds;
   model: AutomationModel;
   reasoningEffort: AutomationReasoningEffort;
 }
@@ -196,7 +196,7 @@ interface AutomationHostResponse {
     automationId?: string;
     enabledByUser: boolean;
     quotaAware: boolean;
-    intervalMinutes: AutomationIntervalMinutes;
+    intervalSeconds: AutomationIntervalSeconds;
     model: AutomationModel;
     reasoningEffort: AutomationReasoningEffort;
   };
@@ -230,7 +230,7 @@ const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
 const DEFAULT_AUTOMATION_OPTIONS = {
   enabledByUser: false,
   quotaAware: false,
-  intervalMinutes: 5,
+  intervalSeconds: 5,
   model: "gpt-5.5",
   reasoningEffort: "high",
 } as const;
@@ -293,6 +293,12 @@ function readProjectAutomations(): ProjectAutomations {
     for (const [projectId, record] of Object.entries(value)) {
       if (!record || typeof record !== "object" || Array.isArray(record)) continue;
       const candidate = record as Partial<ProjectAutomationRecord>;
+      const legacyIntervalMinutes = (record as { intervalMinutes?: unknown }).intervalMinutes;
+      const intervalSeconds = candidate.intervalSeconds ?? (
+        typeof legacyIntervalMinutes === "number" && [5, 10, 15, 30, 60].includes(legacyIntervalMinutes)
+          ? legacyIntervalMinutes * 60
+          : 5
+      );
       const model = candidate.model ?? "gpt-5.5";
       const reasoningEffort = candidate.reasoningEffort ?? "high";
       const enabledByUser = candidate.enabledByUser ?? candidate.status === "ACTIVE";
@@ -301,7 +307,7 @@ function readProjectAutomations(): ProjectAutomations {
         (candidate.automationId !== undefined && typeof candidate.automationId !== "string")
         || typeof candidate.codexProjectId !== "string"
         || (candidate.status !== "ACTIVE" && candidate.status !== "PAUSED")
-        || !isAutomationIntervalMinutes(candidate.intervalMinutes ?? 5)
+        || !isAutomationIntervalSeconds(intervalSeconds)
         || !isAutomationModel(model)
         || !isAutomationReasoningEffort(reasoningEffort)
         || !isSupportedModelEffort(model, reasoningEffort)
@@ -317,7 +323,7 @@ function readProjectAutomations(): ProjectAutomations {
         enabledByUser,
         quotaAware,
         ...(quota ? { quota } : {}),
-        intervalMinutes: candidate.intervalMinutes ?? 5,
+        intervalSeconds,
         model,
         reasoningEffort,
       };
@@ -350,20 +356,23 @@ function isAutomationHostPolicy(
     && (value.automationId === undefined || typeof value.automationId === "string")
     && typeof value.enabledByUser === "boolean"
     && typeof value.quotaAware === "boolean"
-    && isAutomationIntervalMinutes(value.intervalMinutes)
+    && isAutomationIntervalSeconds(value.intervalSeconds)
     && isAutomationModel(value.model)
     && isAutomationReasoningEffort(value.reasoningEffort)
     && isSupportedModelEffort(value.model, value.reasoningEffort),
   );
 }
 
-function isAutomationIntervalMinutes(value: unknown): value is AutomationIntervalMinutes {
-  return value === 5 || value === 10 || value === 15 || value === 30 || value === 60;
+function isAutomationIntervalSeconds(value: unknown): value is AutomationIntervalSeconds {
+  return value === 5 || value === 10 || value === 30 || value === 60
+    || value === 300 || value === 600 || value === 900 || value === 1800 || value === 3600;
 }
 
-function intervalMinutesFromRrule(value: string): AutomationIntervalMinutes | null {
-  const match = /^RRULE:FREQ=MINUTELY;INTERVAL=(5|10|15|30|60)$/.exec(value);
-  return match ? Number(match[1]) as AutomationIntervalMinutes : null;
+function intervalSecondsFromRrule(value: string): AutomationIntervalSeconds | null {
+  const seconds = /^RRULE:FREQ=SECONDLY;INTERVAL=(5|10|30|60|300|600|900|1800|3600)$/.exec(value);
+  if (seconds) return Number(seconds[1]) as AutomationIntervalSeconds;
+  const legacyMinutes = /^RRULE:FREQ=MINUTELY;INTERVAL=(5|10|15|30|60)$/.exec(value);
+  return legacyMinutes ? Number(legacyMinutes[1]) * 60 as AutomationIntervalSeconds : null;
 }
 
 function workspaceName(path?: string): string | null {
@@ -388,7 +397,7 @@ function isAutomationHostItem(value: unknown): value is AutomationHostItem {
     && isAutomationReasoningEffort(item.reasoningEffort)
     && isSupportedModelEffort(item.model, item.reasoningEffort)
     && typeof item.rrule === "string"
-    && intervalMinutesFromRrule(item.rrule) !== null
+    && intervalSecondsFromRrule(item.rrule) !== null
   );
 }
 
@@ -815,7 +824,7 @@ export function App() {
         && current[projectId]?.enabledByUser === record.enabledByUser
         && current[projectId]?.quotaAware === record.quotaAware
         && JSON.stringify(current[projectId]?.quota) === JSON.stringify(record.quota)
-        && current[projectId]?.intervalMinutes === record.intervalMinutes
+        && current[projectId]?.intervalSeconds === record.intervalSeconds
         && current[projectId]?.model === record.model
         && current[projectId]?.reasoningEffort === record.reasoningEffort
       ) {
@@ -834,7 +843,7 @@ export function App() {
     operation: "ensure-active" | "pause" | "list" | "apply-policy",
     options: Pick<
       ProjectAutomationRecord,
-      "enabledByUser" | "quotaAware" | "intervalMinutes" | "model" | "reasoningEffort"
+      "enabledByUser" | "quotaAware" | "intervalSeconds" | "model" | "reasoningEffort"
     >,
     _automationId?: string,
   ) => {
@@ -853,7 +862,7 @@ export function App() {
     return updateProjectAutomation<AutomationHostResponse>(selectedProjectId, {
       enabledByUser: options.enabledByUser,
       quotaAware: options.quotaAware,
-      intervalMinutes: options.intervalMinutes,
+      intervalSeconds: options.intervalSeconds,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
     });
@@ -900,7 +909,7 @@ export function App() {
           status: item?.status ?? "PAUSED",
           enabledByUser: policy.enabledByUser,
           quotaAware: policy.quotaAware,
-          intervalMinutes: policy.intervalMinutes,
+          intervalSeconds: policy.intervalSeconds,
           model: policy.model,
           reasoningEffort: policy.reasoningEffort,
         });
@@ -920,8 +929,8 @@ export function App() {
         }
         return;
       }
-      const intervalMinutes = intervalMinutesFromRrule(item.rrule);
-      if (!intervalMinutes) return;
+      const intervalSeconds = intervalSecondsFromRrule(item.rrule);
+      if (!intervalSeconds) return;
       writeProjectAutomation(selectedProjectId, {
         automationId: item.id,
         codexProjectId: automationProjectContext.codexProjectId,
@@ -929,7 +938,7 @@ export function App() {
         enabledByUser: stored.enabledByUser,
         quotaAware: stored.quotaAware,
         ...(response.quota ? { quota: response.quota } : {}),
-        intervalMinutes,
+        intervalSeconds,
         model: item.model,
         reasoningEffort: item.reasoningEffort,
       });
@@ -949,7 +958,7 @@ export function App() {
   const saveProjectAutomation = useCallback(async (options: {
     enabledByUser: boolean;
     quotaAware: boolean;
-    intervalMinutes: AutomationIntervalMinutes;
+    intervalSeconds: AutomationIntervalSeconds;
     model: AutomationModel;
     reasoningEffort: AutomationReasoningEffort;
   }) => {
@@ -977,7 +986,7 @@ export function App() {
         enabledByUser: options.enabledByUser,
         quotaAware: options.quotaAware,
         ...(response.quota ? { quota: response.quota } : {}),
-        intervalMinutes: options.intervalMinutes,
+        intervalSeconds: options.intervalSeconds,
         model: options.model,
         reasoningEffort: options.reasoningEffort,
       });
@@ -2074,8 +2083,6 @@ export function App() {
           developmentContext: null,
           dueDate: null,
           recurrence: null,
-          codexThreadId: null,
-          codexThreadName: null,
         }));
       }
       setTasks((current) => sortTasks([

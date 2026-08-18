@@ -167,7 +167,7 @@ function projectAutomationFromRow(row) {
     hostType: row.host_type ?? "codex",
     enabledByUser: Boolean(row.enabled_by_user),
     quotaAware: Boolean(row.quota_aware),
-    intervalMinutes: row.interval_minutes,
+    intervalSeconds: row.interval_seconds ?? row.interval_minutes * 60,
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     nextRunAt: row.next_run_at,
@@ -357,6 +357,7 @@ export class TaskboardDatabase {
         enabled_by_user INTEGER NOT NULL DEFAULT 0 CHECK (enabled_by_user IN (0, 1)),
         quota_aware INTEGER NOT NULL DEFAULT 0 CHECK (quota_aware IN (0, 1)),
         interval_minutes INTEGER NOT NULL CHECK (interval_minutes IN (5, 10, 15, 30, 60)),
+        interval_seconds INTEGER NOT NULL DEFAULT 300 CHECK (interval_seconds BETWEEN 5 AND 3600),
         model TEXT NOT NULL,
         reasoning_effort TEXT NOT NULL,
         next_run_at TEXT,
@@ -377,6 +378,10 @@ export class TaskboardDatabase {
     const automationColumns = this.database.prepare("PRAGMA table_info(project_automations)").all();
     if (!automationColumns.some((column) => column.name === "host_type")) {
       this.database.exec("ALTER TABLE project_automations ADD COLUMN host_type TEXT NOT NULL DEFAULT 'codex'");
+    }
+    if (!automationColumns.some((column) => column.name === "interval_seconds")) {
+      this.database.exec("ALTER TABLE project_automations ADD COLUMN interval_seconds INTEGER NOT NULL DEFAULT 300");
+      this.database.exec("UPDATE project_automations SET interval_seconds = interval_minutes * 60");
     }
 
     const projectColumns = this.database.prepare("PRAGMA table_info(projects)").all();
@@ -1039,14 +1044,15 @@ export class TaskboardDatabase {
       : current?.nextRunAt ?? timestamp;
     this.database.prepare(`
       INSERT INTO project_automations (
-        project_id, host_type, enabled_by_user, quota_aware, interval_minutes,
+        project_id, host_type, enabled_by_user, quota_aware, interval_minutes, interval_seconds,
         model, reasoning_effort, next_run_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_id) DO UPDATE SET
         host_type = excluded.host_type,
         enabled_by_user = excluded.enabled_by_user,
         quota_aware = excluded.quota_aware,
         interval_minutes = excluded.interval_minutes,
+        interval_seconds = excluded.interval_seconds,
         model = excluded.model,
         reasoning_effort = excluded.reasoning_effort,
         next_run_at = excluded.next_run_at,
@@ -1056,7 +1062,8 @@ export class TaskboardDatabase {
       input.hostType ?? current?.hostType ?? "codex",
       input.enabledByUser ? 1 : 0,
       input.quotaAware ? 1 : 0,
-      input.intervalMinutes,
+      5,
+      input.intervalSeconds,
       input.model,
       input.reasoningEffort,
       nextRunAt,
@@ -1114,7 +1121,7 @@ export class TaskboardDatabase {
       }
 
       const nextRunAt = new Date(
-        Date.parse(timestamp) + policyRow.interval_minutes * 60_000,
+        Date.parse(timestamp) + policyRow.interval_seconds * 1_000,
       ).toISOString();
       const taskRow = this.database.prepare(`
         SELECT tasks.*
@@ -1170,21 +1177,7 @@ export class TaskboardDatabase {
         return null;
       }
 
-      const targetOrder = this.database.prepare(`
-        SELECT COALESCE(MAX(sort_order), 0) + 1000 AS value
-        FROM tasks
-        WHERE project_id = ? AND status = 'in_progress' AND archived_at IS NULL
-      `).get(projectId).value;
       const leaseExpiresAt = new Date(Date.parse(timestamp) + 30 * 60_000).toISOString();
-      const moved = this.database.prepare(`
-        UPDATE tasks
-        SET status = 'in_progress', sort_order = ?, version = version + 1, updated_at = ?
-        WHERE id = ? AND version = ? AND status = 'todo' AND archived_at IS NULL
-      `).run(targetOrder, timestamp, taskRow.id, taskRow.version);
-      if (moved.changes !== 1) {
-        this.database.exec("ROLLBACK");
-        return null;
-      }
       this.database.prepare(`
         UPDATE project_automations
         SET
@@ -1211,15 +1204,44 @@ export class TaskboardDatabase {
 
   attachAutomationRun(projectId, taskId, threadId, runId) {
     const timestamp = now();
-    const result = this.database.prepare(`
-      UPDATE project_automations
-      SET active_thread_id = ?, active_run_id = ?, updated_at = ?
-      WHERE project_id = ? AND active_task_id = ?
-    `).run(threadId, runId, timestamp, projectId, taskId);
-    if (result.changes !== 1) {
-      throw new ApiError(409, "AUTOMATION_CLAIM_LOST", "Automatic task claim is no longer active");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const policy = this.database.prepare(`
+        SELECT active_task_id, active_run_id FROM project_automations WHERE project_id = ?
+      `).get(projectId);
+      if (policy?.active_task_id !== taskId || policy.active_run_id) {
+        throw new ApiError(409, "AUTOMATION_CLAIM_LOST", "Automatic task claim is no longer active");
+      }
+      const targetOrder = this.database.prepare(`
+        SELECT COALESCE(MAX(sort_order), 0) + 1000 AS value
+        FROM tasks
+        WHERE project_id = ? AND status = 'in_progress' AND archived_at IS NULL
+      `).get(projectId).value;
+      const moved = this.database.prepare(`
+        UPDATE tasks
+        SET status = 'in_progress', sort_order = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND status = 'todo' AND archived_at IS NULL
+      `).run(targetOrder, timestamp, taskId);
+      if (moved.changes !== 1) {
+        throw new ApiError(409, "AUTOMATION_CLAIM_LOST", "Automatic task is no longer waiting in todo");
+      }
+      const attached = this.database.prepare(`
+        UPDATE project_automations
+        SET active_thread_id = ?, active_run_id = ?, updated_at = ?
+        WHERE project_id = ? AND active_task_id = ? AND active_run_id IS NULL
+      `).run(threadId, runId, timestamp, projectId, taskId);
+      if (attached.changes !== 1) {
+        throw new ApiError(409, "AUTOMATION_CLAIM_LOST", "Automatic task claim is no longer active");
+      }
+      this.database.exec("COMMIT");
+      return {
+        policy: this.getProjectAutomation(projectId),
+        task: this.getTask(taskId),
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
     }
-    return this.getProjectAutomation(projectId);
   }
 
   renewAutomationLease(projectId, runId) {

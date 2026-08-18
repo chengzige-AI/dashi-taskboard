@@ -989,6 +989,7 @@ function parseProjectAutomation(body) {
   assertAllowedKeys(body, new Set([
     "enabledByUser",
     "quotaAware",
+    "intervalSeconds",
     "intervalMinutes",
     "model",
     "reasoningEffort",
@@ -1005,8 +1006,13 @@ function parseProjectAutomation(body) {
   if (typeof body.quotaAware !== "boolean") {
     throw new ApiError(400, "INVALID_FIELD", "'quotaAware' must be a boolean");
   }
-  if (![5, 10, 15, 30, 60].includes(body.intervalMinutes)) {
-    throw new ApiError(400, "INVALID_FIELD", "'intervalMinutes' must be 5, 10, 15, 30, or 60");
+  const intervalSeconds = body.intervalSeconds ?? (
+    [5, 10, 15, 30, 60].includes(body.intervalMinutes)
+      ? body.intervalMinutes * 60
+      : null
+  );
+  if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 3600) {
+    throw new ApiError(400, "INVALID_FIELD", "'intervalSeconds' must be an integer from 5 to 3600");
   }
   if (!isSupportedModelEffort(body.model, body.reasoningEffort)) {
     throw new ApiError(400, "INVALID_FIELD", "The selected model does not support this reasoning effort");
@@ -1014,7 +1020,7 @@ function parseProjectAutomation(body) {
   return {
     enabledByUser: body.enabledByUser,
     quotaAware: body.quotaAware,
-    intervalMinutes: body.intervalMinutes,
+    intervalSeconds,
     model: body.model,
     reasoningEffort: body.reasoningEffort,
   };

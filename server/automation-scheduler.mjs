@@ -29,7 +29,7 @@ function automationItem(policy) {
     status: policy.enabledByUser && !policy.quotaAware ? "ACTIVE" : "PAUSED",
     model: policy.model,
     reasoningEffort: policy.reasoningEffort,
-    rrule: `RRULE:FREQ=MINUTELY;INTERVAL=${policy.intervalMinutes}`,
+    rrule: `RRULE:FREQ=SECONDLY;INTERVAL=${policy.intervalSeconds}`,
     nextRunAt: policy.nextRunAt ? Math.floor(Date.parse(policy.nextRunAt) / 1_000) : null,
   };
 }
@@ -45,7 +45,7 @@ export function projectAutomationResponse(policy) {
           automationId: item.id,
           enabledByUser: policy.enabledByUser,
           quotaAware: policy.quotaAware,
-          intervalMinutes: policy.intervalMinutes,
+          intervalSeconds: policy.intervalSeconds,
           model: policy.model,
           reasoningEffort: policy.reasoningEffort,
         }
@@ -116,6 +116,7 @@ export class ProjectAutomationScheduler {
 
   async #launch({ task, policy }) {
     let thread = null;
+    let run = null;
     try {
       thread = await this.aiChat.createThread({
         projectId: task.projectId,
@@ -126,21 +127,33 @@ export class ProjectAutomationScheduler {
         sandbox: "workspace-write",
         codexThreadId: task.codexThreadId ?? undefined,
       });
-      const run = await this.aiChat.startTurn(thread.id, {
+      run = await this.aiChat.startTurn(thread.id, {
         message: automationPrompt(task),
         skills: [],
         attachments: [],
       });
-      this.database.attachAutomationRun(task.projectId, task.id, thread.id, run.id);
+      const activated = this.database.attachAutomationRun(
+        task.projectId,
+        task.id,
+        thread.id,
+        run.id,
+      );
       const comment = this.database.createComment(task.id, {
-        body: `AI 已自动认领任务，执行会话：${thread.id}`,
+        body: `AI 已自动认领任务，执行会话：${thread.codexThreadId ?? thread.id}`,
         threadId: thread.id,
         actor: AI_AGENT_ACTOR,
       });
-      this.events.emit("task.moved", { task: this.database.getTask(task.id) });
+      this.events.emit("task.moved", { task: activated.task });
       this.events.emit("comment.created", { comment });
     } catch (error) {
       const message = compactError(error);
+      if (run) {
+        try {
+          await this.aiChat.interrupt(run.id);
+        } catch {
+          // Preserve the launch error as the user-facing failure.
+        }
+      }
       const restored = this.database.rollbackAutomationClaim(task.projectId, task.id, message);
       if (restored) {
         const blocked = this.database.moveTask(restored.id, restored.version, "blocked");
@@ -166,12 +179,22 @@ export class ProjectAutomationScheduler {
   async #reconcile(policy) {
     if (!policy.activeRunId || !policy.activeTaskId) return;
     const run = this.database.getAiChatRun(policy.activeRunId);
+    let task = this.database.getTask(policy.activeTaskId);
+    const thread = policy.activeThreadId
+      ? this.database.getAiChatThread(policy.activeThreadId)
+      : null;
+    if (task && thread?.codexThreadId && !task.codexThreadId) {
+      task = this.database.updateTask(task.id, task.version, {
+        codexThreadId: thread.codexThreadId,
+        codexThreadName: thread.title,
+      }, thread.id);
+      this.events.emit("task.updated", { task });
+    }
     if (!run || run.status === "running") {
       if (run) this.database.renewAutomationLease(policy.projectId, run.id);
       return;
     }
 
-    const task = this.database.getTask(policy.activeTaskId);
     const failed = run.status !== "completed";
     const error = failed ? compactError(run.error || `AI exited with code ${run.exitCode}`) : null;
     this.database.finishAutomationRun(policy.projectId, run.id, error);

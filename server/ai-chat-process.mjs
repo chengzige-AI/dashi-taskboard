@@ -450,10 +450,16 @@ export function spawnCodexTurn({
   let stdoutEnded = false;
   let resolveCompletion;
   let rejectCompletion;
+  let resolveStarted;
+  let rejectStarted;
 
   const completion = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
+  });
+  const started = new Promise((resolve, reject) => {
+    resolveStarted = resolve;
+    rejectStarted = reject;
   });
 
   function terminateProcessGroup() {
@@ -554,7 +560,12 @@ export function spawnCodexTurn({
       bytes.subarray(0, STDERR_LIMIT - stderrBuffer.length),
     ]);
   });
-  child.on("error", rejectWithDiagnostic);
+  child.once("spawn", resolveStarted);
+  child.on("error", (error) => {
+    const diagnostic = normalizeCommandError(error instanceof Error ? error : new Error(String(error)));
+    rejectStarted(diagnostic);
+    rejectWithDiagnostic(diagnostic);
+  });
   child.on("close", (exitCode, signal) => {
     finishStdout();
     if (settled) return;
@@ -571,7 +582,7 @@ export function spawnCodexTurn({
   child.stdin.on("error", () => {});
   child.stdin.end(prompt);
 
-  return { child, completion };
+  return { child, started, completion };
 }
 
 export function spawnClaudeTurn(options) {

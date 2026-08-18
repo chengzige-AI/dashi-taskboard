@@ -23,7 +23,7 @@ test("project automation state is device-local and scoped by taskboard project",
   assert.match(appSource, /type ProjectAutomationStatus = "ACTIVE" \| "PAUSED"/);
   assert.match(appSource, /automationId\?: string/);
   assert.match(appSource, /codexProjectId: string/);
-  assert.match(appSource, /type AutomationIntervalMinutes = 5 \| 10 \| 15 \| 30 \| 60/);
+  assert.match(appSource, /type AutomationIntervalSeconds = 5 \| 10 \| 30 \| 60 \| 300 \| 600 \| 900 \| 1800 \| 3600/);
   assert.match(appSource, /DEFAULT_AUTOMATION_OPTIONS[\s\S]*?model: "gpt-5\.5"[\s\S]*?reasoningEffort: "high"/);
   assert.match(appSource, /localStorage\.getItem\(PROJECT_AUTOMATIONS_KEY\)/);
   assert.match(appSource, /localStorage\.setItem\(PROJECT_AUTOMATIONS_KEY, JSON\.stringify\(next\)\)/);
@@ -38,7 +38,7 @@ test("automation settings use the loopback server policy contract", () => {
   assert.match(appSource, /getProjectAutomation<AutomationHostResponse>\(selectedProjectId\)/);
   assert.match(
     appSource,
-    /updateProjectAutomation<AutomationHostResponse>\(selectedProjectId, \{\s*enabledByUser: options\.enabledByUser,\s*quotaAware: options\.quotaAware,\s*intervalMinutes: options\.intervalMinutes,\s*model: options\.model,\s*reasoningEffort: options\.reasoningEffort,\s*\}\)/s,
+    /updateProjectAutomation<AutomationHostResponse>\(selectedProjectId, \{\s*enabledByUser: options\.enabledByUser,\s*quotaAware: options\.quotaAware,\s*intervalSeconds: options\.intervalSeconds,\s*model: options\.model,\s*reasoningEffort: options\.reasoningEffort,\s*\}\)/s,
   );
 });
 
@@ -59,7 +59,8 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.match(menuSource, /无自动化/);
   assert.doesNotMatch(menuSource, /已开启自动认领|自动认领未开启/);
   assert.match(menuSource, /自动认领开关/);
-  assert.match(menuSource, /5, 10, 15, 30, 60/);
+  assert.match(menuSource, /<option value=\{5\}>5 秒<\/option>/);
+  assert.match(menuSource, /<option value=\{300\}>5 分钟<\/option>/);
   assert.match(menuSource, /AUTOMATION_MODELS\.map/);
   assert.match(menuSource, /EFFORT_LABELS\[effort\]/);
   assert.match(menuSource, /createPortal/);

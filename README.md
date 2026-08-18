@@ -97,7 +97,7 @@ The Microsoft Store Codex app does not expose its packaged `codex.exe` as a norm
 
 For a project-private installation under `.data/tools`, launch with `start-taskboard-windows.cmd`. It uses the private Node.js and Codex CLI without changing the system PATH. On the first run it opens the official Codex sign-in flow; after authorization it starts Taskboard automatically.
 
-The **自动认领待办** menu is backed by the local Taskboard service on Windows. Once enabled, it keeps working while the browser page is closed as long as the Taskboard service is running. Each project runs at most one automatic task at a time. The scheduler skips todos with unfinished blockers, atomically moves the selected task to `in_progress`, and starts a linked Agent conversation in that project's working directory. A successful run moves the task to done; a failed run moves it to blocked and records the error.
+The **自动认领待办** menu is backed by the local Taskboard service on Windows. Once enabled, it keeps working while the browser page is closed as long as the Taskboard service is running. The polling interval can be set as low as 5 seconds, and each project runs at most one automatic task at a time. The scheduler skips todos with unfinished blockers, reserves the selected task, starts a linked Agent conversation in that project's working directory, and moves the task to `in_progress` only after the Agent process has actually started. A successful run moves the task to done; a launch or execution failure moves it to blocked and records the error.
 
 Install the Taskboard Skill for the Windows Codex app with:
 

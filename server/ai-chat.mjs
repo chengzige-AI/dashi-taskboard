@@ -311,7 +311,7 @@ export class AiChatService {
       let terminalOutcome = null;
       let terminalError = "";
       const spawnTurn = claude ? spawnClaudeTurn : spawnCodexTurn;
-      const { child, completion } = spawnTurn({
+      const { child, started, completion } = spawnTurn({
         executable: claude ? this.claudeExecutable : this.codexExecutable,
         args,
         prompt,
@@ -383,6 +383,12 @@ export class AiChatService {
       );
       this.completions.set(run.id, finalization);
       void finalization.finally(() => this.completions.delete(run.id)).catch(() => {});
+      try {
+        await started;
+      } catch (error) {
+        await finalization.catch(() => {});
+        throw error;
+      }
       return run;
     } catch (error) {
       if (temporaryDirectory) {

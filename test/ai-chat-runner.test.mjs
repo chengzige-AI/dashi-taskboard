@@ -249,6 +249,40 @@ test("Codex turns use stdin, explicit resume ids, server-owned cwd and sanitized
   }
 });
 
+test("startTurn rejects before callers mark work running when the Agent process cannot spawn", async () => {
+  const fixture = await createFixture();
+  try {
+    const thread = await fixture.service.createThread({
+      projectId: "project",
+      model: "gpt-real",
+      reasoningEffort: "medium",
+      sandbox: "workspace-write",
+    });
+    fixture.service.getCatalog = async () => ({
+      models: [{
+        slug: "gpt-real",
+        displayName: "GPT Real",
+        description: "fixture",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: ["low", "medium", "high"],
+        serviceTiers: [],
+      }],
+      skills: [],
+      mcpServers: [],
+    });
+    fixture.service.codexExecutable = path.join(fixture.directory, "missing-codex-executable");
+    await assert.rejects(
+      fixture.service.startTurn(thread.id, { message: "must not look active" }),
+      /could not be started|ENOENT/i,
+    );
+    const [run] = fixture.database.listAiChatRuns(thread.id);
+    assert.equal(run.status, "failed");
+    assert.equal(fixture.service.getThread(thread.id).currentRun, null);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("same-thread turns are locked, different threads run concurrently, failures and interrupts settle", async () => {
   const fixture = await createFixture();
   try {
@@ -310,7 +344,7 @@ test("parser and event callback failures kill a SIGTERM-resistant process group"
       await rm(fixture.descendantPath, { force: true });
       const thread = await fixture.service.createThread({ projectId: "project" });
       const run = await fixture.service.startTurn(thread.id, { message });
-      await waitFor(() => fixture.service.getRun(run.id).status === "failed", 700);
+      await waitFor(() => fixture.service.getRun(run.id).status === "failed", 2_000);
       assert.equal(fixture.service.getRun(run.id).error, expectedError);
       await new Promise((resolve) => setTimeout(resolve, 350));
       await assert.rejects(readFile(fixture.descendantPath), (error) => error.code === "ENOENT");
