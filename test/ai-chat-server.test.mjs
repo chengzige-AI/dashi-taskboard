@@ -26,13 +26,24 @@ if (args[0] === "debug") {
       if (!line.trim()) continue; const message=JSON.parse(line);
       if (message.id===1) process.stdout.write('{"id":1,"result":{}}\\n');
       if (message.id===2 && message.method==="skills/list") process.stdout.write('{"id":2,"result":{"data":[{"skills":[{"name":"real-skill","enabled":true,"scope":"repo","interface":null}]}]}}\\n');
-      if (message.id===2 && message.method==="thread/list") process.stdout.write(JSON.stringify({id:2,result:{data:[
-        {id:"project-thread",name:"Project thread",preview:"inside",cwd:workspace,createdAt:1,updatedAt:3,status:{type:"idle"}},
-        {id:"loose-thread",name:"Loose thread",preview:"outside",cwd:directory,createdAt:2,updatedAt:4,status:{type:"idle"}},
-        {id:"automation-thread",name:"<taskboard_context> issue_identifier: LOCAL-9",preview:"Taskboard 服务端自动认领任务",cwd:workspace,createdAt:3,updatedAt:5,status:{type:"idle"}},
-        {id:"broken-title",name:"?????READY????????????????",preview:"",cwd:directory,createdAt:4,updatedAt:6,status:{type:"idle"}},
-        {id:"subagent-thread",name:"Subagent",preview:"hidden",cwd:workspace,parentThreadId:"parent",createdAt:2,updatedAt:5,status:{type:"idle"}}
-      ]}})+"\\n");
+      if (message.id===2 && message.method==="thread/list") {
+        if (Object.hasOwn(message.params, "sourceKinds")) {
+          process.stdout.write(JSON.stringify({id:2,error:{message:"interactive sources must use the protocol default"}})+"\\n");
+        } else if (message.params.cursor === "page-2") {
+          process.stdout.write(JSON.stringify({id:2,result:{data:[
+            {id:"project-thread-page-2",name:"Older project thread",preview:"inside page 2",source:"vscode",cwd:workspace,createdAt:0,updatedAt:0,status:{type:"idle"}}
+          ],nextCursor:null}})+"\\n");
+        } else {
+          process.stdout.write(JSON.stringify({id:2,result:{data:[
+            {id:"project-thread",name:"Project thread",preview:"inside",source:"vscode",cwd:workspace,createdAt:1,updatedAt:3,status:{type:"idle"}},
+            {id:"loose-thread",name:"Loose thread",preview:"outside",source:"cli",cwd:directory,createdAt:2,updatedAt:4,status:{type:"idle"}},
+            {id:"automation-thread",name:"<taskboard_context> issue_identifier: LOCAL-9",preview:"Taskboard 服务端自动认领任务",source:"vscode",cwd:workspace,createdAt:3,updatedAt:5,status:{type:"idle"}},
+            {id:"exec-thread",name:"Invisible exec result",preview:"hidden from desktop",source:"exec",cwd:workspace,createdAt:4,updatedAt:6,status:{type:"idle"}},
+            {id:"broken-title",name:"?????READY????????????????",preview:"",source:"vscode",cwd:directory,createdAt:4,updatedAt:6,status:{type:"idle"}},
+            {id:"subagent-thread",name:"Subagent",preview:"hidden",source:"vscode",cwd:workspace,parentThreadId:"parent",createdAt:2,updatedAt:5,status:{type:"idle"}}
+          ],nextCursor:"page-2"}})+"\\n");
+        }
+      }
     }
   });
 } else {
@@ -54,6 +65,7 @@ if (args[0] === "debug") {
     codexExecutable,
     codexStatePath,
     skillPath: "/fixture/manage-taskboard/SKILL.md",
+    nativeCodexThreads: false,
   });
   const address = await app.listen({ host, port: 0 });
   return {
@@ -174,14 +186,21 @@ test("Codex thread resources group native project and non-project sessions", asy
   try {
     const projectThreads = await request(fixture.baseUrl, "/api/local/codex-threads?projectId=local");
     assert.equal(projectThreads.response.status, 200);
-    assert.deepEqual(projectThreads.body.threads.map((thread) => thread.id), ["project-thread", "automation-thread"]);
+    assert.deepEqual(projectThreads.body.threads.map((thread) => thread.id), [
+      "automation-thread",
+      "project-thread",
+      "project-thread-page-2",
+    ]);
 
     const snapshot = await request(fixture.baseUrl, "/api/local/codex-thread-resources");
     assert.equal(snapshot.response.status, 200);
     assert.deepEqual(snapshot.body.projects, [{ id: "local", workspacePath: fixture.workspace }]);
-    assert.deepEqual(snapshot.body.projectThreads.local.map((thread) => thread.id), ["project-thread"]);
+    assert.deepEqual(snapshot.body.projectThreads.local.map((thread) => thread.id), [
+      "project-thread",
+      "project-thread-page-2",
+    ]);
     assert.deepEqual(snapshot.body.unassignedThreads.map((thread) => thread.id), ["loose-thread"]);
-    assert.doesNotMatch(JSON.stringify(snapshot.body), /subagent-thread|automation-thread|broken-title/);
+    assert.doesNotMatch(JSON.stringify(snapshot.body), /subagent-thread|automation-thread|exec-thread|broken-title/);
 
     const rejectedQuery = await request(fixture.baseUrl, "/api/local/codex-thread-resources?projectId=local");
     assert.equal(rejectedQuery.response.status, 400);

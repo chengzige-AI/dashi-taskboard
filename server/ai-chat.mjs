@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { ApiError } from "./database.mjs";
 import { discoverAiCatalog, discoverClaudeCatalog, resolveAiWorkspace } from "./ai-chat-catalog.mjs";
+import { spawnCodexNativeTurn } from "./codex-native-turn.mjs";
 import {
   buildClaudeArgs,
   buildClaudePrompt,
@@ -57,6 +58,7 @@ export class AiChatService {
     this.codexStatePath = options.codexStatePath;
     this.manageTaskboardSkillPath = options.manageTaskboardSkillPath;
     this.processEnv = options.processEnv ?? process.env;
+    this.nativeCodexThreads = options.nativeCodexThreads ?? true;
     this.killGraceMs = options.killGraceMs ?? 1_000;
     this.active = new Map();
     this.listeners = new Map();
@@ -272,9 +274,13 @@ export class AiChatService {
     } = await this.#writeTurnAttachments(attachments);
     try {
       const claude = this.agentHost === "claude-code";
+      const useNativeCodexThread = this.nativeCodexThreads
+        && !claude
+        && !thread.codexThreadId
+        && thread.sandbox === "workspace-write";
       const args = claude
         ? buildClaudeArgs(thread, resolved.addDirectories)
-        : buildCodexArgs(thread, resolved.addDirectories, imagePaths);
+        : (useNativeCodexThread ? null : buildCodexArgs(thread, resolved.addDirectories, imagePaths));
       const promptBuilder = claude ? buildClaudePrompt : buildCodexPrompt;
       const prompt = input.direct === true
         ? input.message
@@ -312,10 +318,15 @@ export class AiChatService {
       let startedThreadId = null;
       let terminalOutcome = null;
       let terminalError = "";
-      const spawnTurn = claude ? spawnClaudeTurn : spawnCodexTurn;
+      const spawnTurn = claude
+        ? spawnClaudeTurn
+        : (useNativeCodexThread ? spawnCodexNativeTurn : spawnCodexTurn);
       const { child, started, completion } = spawnTurn({
         executable: claude ? this.claudeExecutable : this.codexExecutable,
         args,
+        thread,
+        addDirectories: resolved.addDirectories,
+        imagePaths,
         prompt,
         cwd: resolved.workspacePath,
         env: {

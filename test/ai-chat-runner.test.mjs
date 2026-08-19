@@ -148,6 +148,7 @@ if (args[0] === "app-server") {
       FAKE_CAPTURE_PATH: capturePath,
       FAKE_DESCENDANT_PATH: descendantPath,
     },
+    nativeCodexThreads: false,
     killGraceMs: 50,
   });
   return {

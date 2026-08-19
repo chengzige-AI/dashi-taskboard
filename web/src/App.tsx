@@ -98,7 +98,7 @@ type Theme = "light" | "dark";
 type BoardView = "issues" | "workflow";
 const SHOW_WORKFLOW_BOARD_ENTRY = false;
 const NON_PROJECT_RESOURCE_ID = "__non_project_sessions__";
-const CODEX_THREAD_RESOURCE_POLL_MS = 10_000;
+const CODEX_THREAD_RESOURCE_POLL_MS = 5_000;
 const WORKBENCH_STATUSES: TaskStatus[] = ["backlog", "todo", "in_progress"];
 const STATUS_DOCK_STATUSES: TaskStatus[] = ["in_review", "blocked", "done"];
 

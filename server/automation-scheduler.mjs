@@ -120,7 +120,7 @@ export class ProjectAutomationScheduler {
       thread = await this.aiChat.createThread({
         projectId: task.projectId,
         issueId: task.id,
-        title: `自动执行 · ${task.identifier}`,
+        title: task.title,
         model: policy.model,
         reasoningEffort: policy.reasoningEffort,
         sandbox: "workspace-write",

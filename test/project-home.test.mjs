@@ -21,7 +21,7 @@ test("the resource library shows only native Codex projects and thread resources
   assert.match(appSource, /NON_PROJECT_RESOURCE_ID/);
   assert.match(appSource, />非项目会话</);
   assert.match(appSource, /codexThreadResourcesLoaded\s*\? codexResourceProjects\.map/);
-  assert.match(appSource, /CODEX_THREAD_RESOURCE_POLL_MS = 10_000/);
+  assert.match(appSource, /CODEX_THREAD_RESOURCE_POLL_MS = 5_000/);
   assert.match(appSource, /addEventListener\("visibilitychange", refreshWhenVisible\)/);
   assert.match(appSource, /validThreadKeys/);
   assert.match(appSource, /setPublisherThreads\(\(current\) =>/);

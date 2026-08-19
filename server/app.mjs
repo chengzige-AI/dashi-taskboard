@@ -1532,6 +1532,7 @@ export function createTaskboardServer(options = {}) {
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
     processEnv: aiProcessEnv,
+    nativeCodexThreads: options.nativeCodexThreads,
   });
   const automations = new ProjectAutomationScheduler({
     database,

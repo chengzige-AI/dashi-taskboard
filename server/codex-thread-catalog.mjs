@@ -1,12 +1,11 @@
-import { createReadStream } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { createInterface } from "node:readline";
 
 import { normalizeCodexCommandError, spawnCodexCommand } from "./codex-command.mjs";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const RESPONSE_LIMIT = 8 * 1024 * 1024;
+const THREAD_PAGE_LIMIT = 100;
+const MAX_THREAD_PAGES = 100;
 
 export function callAppServer({ codexExecutable, cwd, processEnv, method, params }) {
   return new Promise((resolve, reject) => {
@@ -95,6 +94,10 @@ function isTaskboardAutomationTitle(value) {
 
 function cleanThread(thread) {
   if (!thread || typeof thread.id !== "string" || !thread.id.trim()) return null;
+  const interactiveSource = thread.source === "cli"
+    || thread.source === "vscode"
+    || ["atlas", "chatgpt"].includes(thread.source?.custom);
+  if (!interactiveSource) return null;
   const sourceMetadata = JSON.stringify({
     source: thread.source,
     sourceKind: thread.sourceKind,
@@ -123,38 +126,6 @@ function cleanThread(thread) {
   };
 }
 
-async function firstJsonLine(filename) {
-  return new Promise((resolve) => {
-    const stream = createReadStream(filename, { encoding: "utf8" });
-    const lines = createInterface({ input: stream, crlfDelay: Infinity });
-    const done = (value = null) => {
-      lines.close();
-      stream.destroy();
-      resolve(value);
-    };
-    lines.once("line", (line) => {
-      try { done(JSON.parse(line)); } catch { done(); }
-    });
-    stream.once("error", () => done());
-    stream.once("end", () => done());
-  });
-}
-
-async function sessionFiles(directory) {
-  const files = [];
-  async function visit(current) {
-    let entries;
-    try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
-    await Promise.all(entries.map(async (entry) => {
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) await visit(entryPath);
-      else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(entryPath);
-    }));
-  }
-  await visit(directory);
-  return files;
-}
-
 function sameWorkspace(left, right) {
   const normalizedLeft = path.resolve(left).toLowerCase();
   const normalizedRight = path.resolve(right).toLowerCase();
@@ -162,76 +133,38 @@ function sameWorkspace(left, right) {
     || normalizedLeft.startsWith(`${normalizedRight}${path.sep}`);
 }
 
-async function listDesktopSessionThreads(codexHome, cwd) {
-  const names = new Map();
-  try {
-    const index = await readFile(path.join(codexHome, "session_index.jsonl"), "utf8");
-    for (const line of index.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      try {
-        const record = JSON.parse(line);
-        if (typeof record.id === "string") names.set(record.id, record);
-      } catch {}
+export async function listCodexThreads({ codexExecutable, cwd, processEnv }) {
+  const threads = new Map();
+  let cursor = null;
+  for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
+    const result = await callAppServer({
+      codexExecutable,
+      cwd,
+      processEnv,
+      method: "thread/list",
+      params: {
+        limit: THREAD_PAGE_LIMIT,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        archived: false,
+        ...(cursor ? { cursor } : {}),
+      },
+    });
+    for (const raw of Array.isArray(result?.data) ? result.data : []) {
+      const thread = cleanThread(raw);
+      if (
+        thread
+        && typeof thread.cwd === "string"
+        && (!cwd || sameWorkspace(thread.cwd, cwd))
+      ) threads.set(thread.id, thread);
     }
-  } catch {}
-
-  const files = await sessionFiles(path.join(codexHome, "sessions"));
-  const records = await Promise.all(files.map(async (filename) => {
-    const first = await firstJsonLine(filename);
-    const meta = first?.type === "session_meta" ? first.payload : null;
-    if (
-      !meta
-      || typeof meta.id !== "string"
-      || typeof meta.cwd !== "string"
-      || (cwd && !sameWorkspace(meta.cwd, cwd))
-      || (meta.thread_source && meta.thread_source !== "user")
-    ) return null;
-    const indexed = names.get(meta.id);
-    const indexedUpdatedAt = Date.parse(indexed?.updated_at ?? "");
-    const createdAt = Date.parse(meta.timestamp ?? first.timestamp ?? "");
-    const name = typeof indexed?.thread_name === "string" && indexed.thread_name.trim()
-      ? indexed.thread_name.trim()
-      : "未命名会话";
-    if (looksCorruptedTitle(name)) return null;
-    return {
-      id: meta.id,
-      name,
-      preview: "",
-      cwd: meta.cwd,
-      createdAt: Number.isFinite(createdAt) ? Math.floor(createdAt / 1000) : null,
-      updatedAt: Number.isFinite(indexedUpdatedAt)
-        ? Math.floor(indexedUpdatedAt / 1000)
-        : (Number.isFinite(createdAt) ? Math.floor(createdAt / 1000) : null),
-      status: "notLoaded",
-      ...(isTaskboardAutomationTitle(name) ? { taskboardAutomation: true } : {}),
-    };
-  }));
-  return records.filter(Boolean).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
-}
-
-export async function listCodexThreads({ codexExecutable, codexHome, cwd, processEnv }) {
-  const result = await callAppServer({
-    codexExecutable,
-    cwd,
-    processEnv,
-    method: "thread/list",
-    params: {
-      limit: 100,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
-      archived: false,
-    },
-  });
-  const nativeThreads = (Array.isArray(result?.data) ? result.data : [])
-    .map(cleanThread)
-    .filter((thread) => (
-      thread
-      && typeof thread.cwd === "string"
-      && (!cwd || sameWorkspace(thread.cwd, cwd))
-    ));
-  if (nativeThreads.length > 0) return nativeThreads;
-  return listDesktopSessionThreads(codexHome, cwd);
+    const nextCursor = typeof result?.nextCursor === "string" && result.nextCursor
+      ? result.nextCursor
+      : null;
+    if (!nextCursor || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
+  return [...threads.values()].sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0));
 }
 
 export async function listCodexThreadResources({
