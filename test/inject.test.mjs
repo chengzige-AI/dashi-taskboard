@@ -33,6 +33,8 @@ test("entry clones the native Plugins row and the page covers the complete Codex
   assert.match(source, /if \(siblings\.length >= 3\) return plugin;/);
   assert.match(source, /return directButtons\.length >= 3/);
   assert.match(source, /const button = reference\.cloneNode\(true\)/);
+  assert.match(source, /label\.textContent = "codex-kanban"/);
+  assert.match(source, /button\.textContent = "codex-kanban"/);
   assert.match(source, /reference\.after\(entry\)/);
   assert.match(source, /document\.querySelector\("\.app-shell-main-content-frame"\)/);
   assert.match(source, /const surface = viewport\?\.parentElement/);

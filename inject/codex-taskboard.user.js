@@ -260,14 +260,14 @@
     button.removeAttribute("aria-controls");
     button.removeAttribute("aria-describedby");
     button.removeAttribute("data-state");
-    button.setAttribute("aria-label", "打开任务面板");
-    button.setAttribute("title", "任务面板");
+    button.setAttribute("aria-label", "打开 codex-kanban");
+    button.setAttribute("title", "codex-kanban");
     button.setAttribute(OWNED_ATTRIBUTE, "true");
     button.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
     const label = button.querySelector(".text-fade-truncate")
       || Array.from(button.querySelectorAll("span")).find((node) => buttonMatches(node, PLUGIN_LABELS));
-    if (label) label.textContent = "任务面板";
-    else button.textContent = "任务面板";
+    if (label) label.textContent = "codex-kanban";
+    else button.textContent = "codex-kanban";
     replaceEntryIcon(button);
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -853,7 +853,7 @@
     section.hidden = true;
     section.setAttribute(OWNED_ATTRIBUTE, "true");
     section.setAttribute("role", "region");
-    section.setAttribute("aria-label", "任务面板");
+    section.setAttribute("aria-label", "codex-kanban");
 
     status = document.createElement("div");
     status.id = STATUS_ID;
@@ -955,7 +955,7 @@
     nextFrame.id = FRAME_ID;
     nextFrame.hidden = true;
     nextFrame.src = taskboardUrl.href;
-    nextFrame.title = "任务面板";
+    nextFrame.title = "codex-kanban";
     nextFrame.referrerPolicy = "no-referrer";
     nextFrame.setAttribute("allow", "clipboard-read; clipboard-write");
     nextFrame.addEventListener("load", postHostContext);

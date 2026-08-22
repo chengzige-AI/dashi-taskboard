@@ -1,4 +1,4 @@
-# Dashi Taskboard
+# codex-kanban
 
 A local-first issue board for Codex and Claude Code. Both use the same board and workflow: publish work into backlog, move selected work to todo, let the configured local Agent claim it, then inspect the linked conversation from done or blocked. The Agent type is installation detail and is never shown as a selector in the UI.
 
@@ -71,7 +71,7 @@ Use `npm link` if you want `taskctl` on your shell path. Set `CODEX_TASKBOARD_UR
 Copy or symlink `skills/manage-taskboard` into the Codex skills directory, then start a new Codex task:
 
 ```bash
-ln -s /absolute/path/to/codex-taskboard/skills/manage-taskboard \
+ln -s /absolute/path/to/codex-kanban/skills/manage-taskboard \
   ~/.codex/skills/manage-taskboard
 ```
 

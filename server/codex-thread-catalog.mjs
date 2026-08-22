@@ -74,7 +74,7 @@ export function callAppServer({ codexExecutable, cwd, processEnv, method, params
       id: 1,
       method: "initialize",
       params: {
-        clientInfo: { name: "codex-taskboard", version: "0.1.0" },
+        clientInfo: { name: "codex-kanban", version: "0.1.0" },
         capabilities: { experimentalApi: true },
       },
     }));

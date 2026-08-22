@@ -92,8 +92,9 @@ test("narrow screens keep the resource library, board, and publisher usable", ()
   assert.match(styles, /@media \(max-width: 620px\)[\s\S]*?\.board-column \{/);
 });
 
-test("user-facing Chinese copy is stored as UTF-8 instead of mojibake", () => {
-  assert.match(appSource, />任务面板<\/span>/);
+test("product branding and Chinese copy are stored correctly", () => {
+  assert.match(appSource, />codex-kanban<\/span>/);
+  assert.match(appSource, /codex-kanban needs attention/);
   assert.match(appSource, />\s*议题看板/);
   assert.match(appSource, />项目<\/span>/);
   assert.doesNotMatch(appSource, /浠诲姟|璁|椤圭洰|妯″紡|鎼滅储|鎷栧埌|鈱榋|娓呴櫎/);

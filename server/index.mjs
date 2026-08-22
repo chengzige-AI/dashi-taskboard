@@ -15,14 +15,14 @@ async function main() {
   const app = createTaskboardServer();
   const host = resolveHost();
   const address = await app.listen({ host, port: resolvePort() });
-  console.log(`Codex Taskboard listening on http://127.0.0.1:${address.port}`);
+  console.log(`codex-kanban listening on http://127.0.0.1:${address.port}`);
   if (host === "0.0.0.0") {
     const addresses = Object.values(os.networkInterfaces())
       .flat()
       .filter((entry) => entry?.family === "IPv4" && !entry.internal)
       .map((entry) => entry.address);
     for (const lanAddress of [...new Set(addresses)]) {
-      console.log(`Codex Taskboard available on LAN at http://${lanAddress}:${address.port}`);
+      console.log(`codex-kanban available on LAN at http://${lanAddress}:${address.port}`);
     }
   }
 

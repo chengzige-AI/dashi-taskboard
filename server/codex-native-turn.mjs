@@ -139,8 +139,8 @@ export function spawnCodexNativeTurn({
           approvalsReviewer: "auto_review",
           runtimeWorkspaceRoots: [thread.origin.workspacePath, ...addDirectories],
           ephemeral: false,
-          serviceName: "dashi-taskboard",
-          threadSource: "dashi-taskboard",
+          serviceName: "codex-kanban",
+          threadSource: "codex-kanban",
         },
       });
       return;
@@ -256,7 +256,7 @@ export function spawnCodexNativeTurn({
     id: 1,
     method: "initialize",
     params: {
-      clientInfo: { name: "dashi-taskboard", version: "0.1.0" },
+      clientInfo: { name: "codex-kanban", version: "0.1.0" },
       capabilities: { experimentalApi: true },
     },
   }));

@@ -2063,7 +2063,7 @@ export function App() {
   }
 
   const contextName = workspaceName(hostContext?.workspacePath);
-  const headerProjectName = selectedProject?.name ?? "任务面板";
+  const headerProjectName = selectedProject?.name ?? "codex-kanban";
   const appShellStyle = embedded
     ? { "--codex-titlebar-left-inset": `${hostContext?.titlebarLeftInset ?? 0}px` } as CSSProperties
     : undefined;
@@ -2192,7 +2192,7 @@ export function App() {
         <aside className="app-nav" aria-label="Taskboard navigation">
           <div className="brand-row">
             <span className="brand-mark" aria-hidden="true"><LinearIcon name="project" /></span>
-            <span>任务面板</span>
+            <span>codex-kanban</span>
           </div>
 
           <nav className="primary-nav" aria-label="Views">
@@ -2518,7 +2518,7 @@ export function App() {
         {(loadError || actionError) && (
           <div className="error-banner" role="alert">
             <span className="error-mark" aria-hidden="true"><LinearIcon name="alert" /></span>
-            <div><strong>Taskboard needs attention</strong><p>{actionError ?? loadError}</p></div>
+            <div><strong>codex-kanban needs attention</strong><p>{actionError ?? loadError}</p></div>
             <button
               type="button"
               onClick={() => {
@@ -2535,7 +2535,7 @@ export function App() {
         {!selectedProjectId ? (
           <section className="project-home">
             <div className="project-home-heading">
-              <span>任务面板</span>
+              <span>codex-kanban</span>
               <h1>选择项目</h1>
               <p>Start from a Codex project or a saved Taskboard project.</p>
             </div>

@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title Dashi Taskboard - keep this window open
+title codex-kanban - keep this window open
 
 set "TASKBOARD_ROOT=%~dp0"
 set "TASKBOARD_NODE=%TASKBOARD_ROOT%.data\tools\node\node.exe"
@@ -35,5 +35,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Dashi Taskboard is running. Keep this window open; minimizing it is safe.
+echo codex-kanban is running. Keep this window open; minimizing it is safe.
 "%TASKBOARD_NODE%" "%TASKBOARD_ROOT%scripts\codex-injector.mjs" --launch --watch --open
